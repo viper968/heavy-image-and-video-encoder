@@ -41,7 +41,7 @@ left.
 |---|---:|---:|---|
 | x264 lossless (veryslow) | 321,064 | 7.58x | lossless |
 | x265 lossless (veryslow) | 323,440 | 7.52x | lossless |
-| **hve** | **326,472** | **7.45x** | lossless |
+| **hve** | **325,399** | **7.48x** | lossless |
 | AV1 lossless (libaom) | 340,300 | 7.15x | lossless |
 | VP9 lossless | 347,551 | 7.00x | lossless |
 | FFV1 level 3 | 745,937 | 3.26x | lossless |
@@ -58,18 +58,18 @@ which pans and has fast head movement:
 | x264 lossless | 846,092 | 2.88x | lossless |
 | x265 lossless | 853,010 | 2.85x | lossless |
 | AV1 lossless | 880,345 | 2.76x | lossless |
+| **hve** | **883,078** | **2.76x** | lossless |
 | VP9 lossless | 885,846 | 2.75x | lossless |
-| **hve** | **892,588** | **2.73x** | lossless |
 | FFV1 level 3 | 971,084 | 2.51x | lossless |
 
-hve drops to last among the block codecs, 5.5% behind x264, while still beating
-FFV1 by 8%. That gap is the price of a deliberately simple inter design: one
+hve gives up its lead here — 4.4% behind x264 and level with AV1, against 9%
+ahead of FFV1. That is the price of a deliberately simple inter design: one
 reference frame, full-pel vectors only, a single 16x16 block size, no
 bidirectional prediction. Halving the block size to 8x8 was measured and made it
 slightly *worse* (more mode and vector overhead than it saves), so the missing
 ingredient is sub-pixel motion and variable block sizes, not finer blocks.
 
-Reproduce with `python tools/bench_image.py testdata/images/*.png` and
+Reproduce with `python tools/bench_image.py test` and
 `python tools/bench_video.py testdata/video/akiyo_cif.y4m 16`. Every baseline is
 decoded and compared against the source before its size is reported — Pillow's
 AVIF happily accepts `lossless=True` and returns a lossy image, which is exactly
