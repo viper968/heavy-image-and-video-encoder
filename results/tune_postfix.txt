@@ -1,0 +1,25 @@
+adapt=4 a16 e4 -> 1453623
+adapt=4 a16 e6 -> 1452141
+adapt=4 a24 e4 -> 1453965
+adapt=4 a24 e6 -> 1452543
+adapt=4 a12 e4 -> 1454303
+adapt=4 a12 e6 -> 1452814
+adapt=5 a16 e4 -> 1433401
+adapt=5 a16 e6 -> 1432236
+adapt=5 a24 e4 -> 1434080
+adapt=5 a24 e6 -> 1433128
+adapt=5 a12 e4 -> 1433998
+adapt=5 a12 e6 -> 1432726
+adapt=6 a16 e4 -> 1426061
+adapt=6 a16 e6 -> 1425542
+adapt=6 a24 e4 -> 1427370
+adapt=6 a24 e6 -> 1427261
+adapt=6 a12 e4 -> 1426319
+adapt=6 a12 e6 -> 1425602
+
+best:
+  1425542  adapt=6 a16 e6
+  1425602  adapt=6 a12 e6
+  1426061  adapt=6 a16 e4
+  1426319  adapt=6 a12 e4
+  1427261  adapt=6 a24 e6

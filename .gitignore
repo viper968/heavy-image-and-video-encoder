@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+testdata/
+*.hvi
+*.hvv
+.pytest_cache/

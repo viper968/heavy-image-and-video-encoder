@@ -1,0 +1,17 @@
+measured kodim01.png
+measured kodim05.png
+measured kodim08.png
+measured kodim13.png
+measured kodim19.png
+measured kodim23.png
+
+rung                      bytes       bpp    vs raw    vs prev  what changed
+raw                     7077888    24.000     1.00x             uncompressed RGB bytes
+huffman-global          6680683    22.653     1.06x      -5.6%  one Huffman tree over all bytes
+huffman-perchan         6574377    22.293     1.08x      -1.6%  a Huffman tree per colour channel (the original idea)
+huffman-med             4679107    15.866     1.51x     -28.8%  + MED spatial prediction first
+huffman-rct-med         3319109    11.255     2.13x     -29.1%  + reversible colour transform
+rans-ctx                3150770    10.684     2.25x      -5.1%  + context-modelled static rANS (computed)
+hve                     3005344    10.191     2.36x      -4.6%  + adaptive contexts, cross-channel, sign modelling (measured)
+
+(PNG for scale)         4488577    15.220     1.58x
