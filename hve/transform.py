@@ -21,17 +21,26 @@ CTX_CONFIGS = sorted(CTX_LADDERS)
 
 
 def rct_forward(rgb):
-    """JPEG2000-style reversible colour transform, kept 8-bit by wrapping."""
+    """JPEG2000-style reversible colour transform, kept 8-bit by wrapping.
+
+    The chroma planes are stored biased by +128. Unbiased, B-G sits at zero and
+    therefore straddles the 255/0 wrap, which corrupts every gradient the model
+    computes from it - activity, MED comparisons and neighbour differences all
+    see a huge jump across what is really a one-step change. Biasing moves the
+    typical value to mid-range where none of that happens.
+    """
     a = rgb.astype(np.int32)
     r, g, b = a[..., 0], a[..., 1], a[..., 2]
     cb = (b - g) & 255
     cr = (r - g) & 255
     y = (g + ((_centre(cb) + _centre(cr)) >> 2)) & 255
-    return np.stack([y, cb, cr]).astype(np.uint8)
+    return np.stack([y, (cb + 128) & 255, (cr + 128) & 255]).astype(np.uint8)
 
 
 def rct_inverse(planes):
-    y, cb, cr = (p.astype(np.int32) for p in planes)
+    y, cb_biased, cr_biased = (p.astype(np.int32) for p in planes)
+    cb = (cb_biased - 128) & 255
+    cr = (cr_biased - 128) & 255
     g = (y - ((_centre(cb) + _centre(cr)) >> 2)) & 255
     b = (g + cb) & 255
     r = (g + cr) & 255
