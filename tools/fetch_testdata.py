@@ -1,0 +1,42 @@
+"""Download the test corpus: Kodak photos and Xiph video clips.
+
+The data is not committed - it is several tens of megabytes of other people's
+material. This pulls the exact files the published benchmark numbers used.
+"""
+
+import os
+import sys
+import urllib.request
+
+KODAK = ["01", "05", "08", "13", "19", "23"]
+KODAK_URL = "https://r0k.us/graphics/kodak/kodak/kodim%s.png"
+CLIPS = {
+    "akiyo_cif.y4m": "https://media.xiph.org/video/derf/y4m/akiyo_cif.y4m",
+    "foreman_cif.y4m": "https://media.xiph.org/video/derf/y4m/foreman_cif.y4m",
+}
+
+ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testdata")
+
+
+def fetch(url, path):
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        print("have %s" % os.path.basename(path))
+        return
+    print("get  %s" % os.path.basename(path), flush=True)
+    urllib.request.urlretrieve(url, path)
+
+
+def main():
+    images = os.path.join(ROOT, "images")
+    video = os.path.join(ROOT, "video")
+    os.makedirs(images, exist_ok=True)
+    os.makedirs(video, exist_ok=True)
+    for num in KODAK:
+        fetch(KODAK_URL % num, os.path.join(images, "kodim%s.png" % num))
+    for name, url in CLIPS.items():
+        fetch(url, os.path.join(video, name))
+    print("\ntestdata ready in %s" % ROOT)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

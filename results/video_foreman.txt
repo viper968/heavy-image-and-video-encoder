@@ -1,0 +1,22 @@
+foreman_cif.y4m: 16 frames of 352x288, 2433024 raw bytes
+
+hve done (12.6s enc, 5.8s dec)
+FFV1 (level 3) done
+x264 lossless done
+x265 lossless done
+VP9 lossless done
+AV1 lossless done
+FFVHuff done
+Ut Video done
+
+codec                     bytes      ratio     enc s     dec s  verified
+x264 lossless            846092      2.88x       0.2         -  lossless
+x265 lossless            853010      2.85x       3.0         -  lossless
+AV1 lossless             880345      2.76x       1.6         -  lossless
+VP9 lossless             885846      2.75x       0.8         -  lossless
+hve                      892588      2.73x      12.6       5.8  lossless
+FFV1 (level 3)           971084      2.51x       0.1         -  lossless
+Ut Video                1188353      2.05x       0.0         -  lossless
+FFVHuff                 1222164      1.99x       0.0         -  lossless
+
+Note: container overhead (mkv) is included in the ffmpeg numbers.
