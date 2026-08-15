@@ -8,11 +8,11 @@ done kodim23.png
 6 images, 2359296 pixels, 7077888 raw bytes
 
 codec                     bytes      bpp    ratio     enc s  verified
-AVIF 'lossless'         1952111    6.619    3.63x       1.9  LOSSY (max err 72)
+AVIF 'lossless'         1952111    6.619    3.63x       1.8  LOSSY (max err 72)
 JPEG XL e7              2863336    9.709    2.47x       5.6  lossless
-JPEG XL e9              2863502    9.710    2.47x      19.2  lossless
-hve                     3048321   10.336    2.32x      35.7  lossless
-WebP lossless           3104180   10.526    2.28x      64.9  lossless
+JPEG XL e9              2863502    9.710    2.47x      19.5  lossless
+hve                     3048321   10.336    2.32x      35.4  lossless
+WebP lossless           3104180   10.526    2.28x      64.4  lossless
 PNG (optimised)         4488577   15.220    1.58x       1.2  lossless
 
 hve is +6.46% vs best verified lossless (JPEG XL e7)

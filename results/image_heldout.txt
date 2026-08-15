@@ -1,0 +1,32 @@
+split: test (dev=6 images, held-out test=18 images)
+
+done kodim02.png
+done kodim03.png
+done kodim04.png
+done kodim06.png
+done kodim07.png
+done kodim09.png
+done kodim10.png
+done kodim11.png
+done kodim12.png
+done kodim14.png
+done kodim15.png
+done kodim16.png
+done kodim17.png
+done kodim18.png
+done kodim20.png
+done kodim21.png
+done kodim22.png
+done kodim24.png
+
+18 images, 7077888 pixels, 21233664 raw bytes
+
+codec                     bytes      bpp    ratio     enc s  verified
+AVIF 'lossless'         4915600    5.556    4.32x       4.8  LOSSY (max err 55)
+JPEG XL e9              7346399    8.303    2.89x      56.6  lossless
+JPEG XL e7              7406679    8.372    2.87x      15.7  lossless
+hve                     7987882    9.029    2.66x     100.4  lossless
+WebP lossless           8099860    9.155    2.62x     168.2  lossless
+PNG (optimised)        11321001   12.796    1.88x       5.0  lossless
+
+hve is +8.73% vs best verified lossless (JPEG XL e9)

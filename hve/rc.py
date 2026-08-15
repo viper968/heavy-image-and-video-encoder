@@ -50,6 +50,22 @@ class Encoder:
             self.range = (self.range << 8) & MASK32
             self._shift_low()
 
+    def bit_p(self, p, value):
+        """Code a bit against an externally supplied P(bit=0), with no update.
+
+        Used when the probability comes from a mixer or an APM rather than from
+        a single stored counter — those stages own their own adaptation.
+        """
+        bound = (self.range >> PROB_BITS) * p
+        if value:
+            self.low += bound
+            self.range -= bound
+        else:
+            self.range = bound
+        while self.range < TOP:
+            self.range = (self.range << 8) & MASK32
+            self._shift_low()
+
     def bypass(self, value, nbits):
         """Uniform bits, no model - for mantissas that carry no useful structure."""
         for i in range(nbits - 1, -1, -1):
@@ -84,6 +100,22 @@ class Decoder:
             self.code -= bound
             self.range -= bound
             probs[ctx] = p - (p >> ADAPT_SHIFT)
+            value = 1
+        while self.range < TOP:
+            self.range <<= 8
+            self.code = ((self.code << 8) | self.data[self.pos]) & MASK32
+            self.pos += 1
+        return value
+
+    def bit_p(self, p):
+        """Decode a bit against an externally supplied P(bit=0), with no update."""
+        bound = (self.range >> PROB_BITS) * p
+        if self.code < bound:
+            self.range = bound
+            value = 0
+        else:
+            self.code -= bound
+            self.range -= bound
             value = 1
         while self.range < TOP:
             self.range <<= 8

@@ -6,6 +6,7 @@ image that is not lossless, so an unverified number is worth nothing here.
 """
 
 import io
+import os
 import sys
 import time
 
@@ -13,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, ".")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hve import image as hve_image                    # noqa: E402
 
 
@@ -103,4 +105,13 @@ def main(paths):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("dev", "test", "all"):
+        import corpus
+        which = argv[0] if argv else "test"
+        paths = {"dev": corpus.dev, "test": corpus.test,
+                 "all": lambda: corpus.dev() + corpus.test()}[which]()
+        print("split: %s (%s)\n" % (which, corpus.describe()))
+        main(paths)
+    else:
+        main(argv)

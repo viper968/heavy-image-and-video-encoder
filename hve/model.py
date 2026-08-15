@@ -17,7 +17,7 @@ well-modelled binary decision.
 
 import bisect
 
-from . import rc
+from . import mix, rc
 
 KINDS = 8    # 0-3 spatially predicted (luma, Cb, Cr, alpha); 4-7 the
              # motion-compensated mirror used by video.py
@@ -32,14 +32,63 @@ MAX_NB = 7
 MODE_TEMPORAL = 1
 
 
+# Secondary contexts for the zero flag's extra experts. The point of mixing is
+# that the experts disagree, so these deliberately look at the neighbourhood
+# differently from the primary activity-and-error context.
+DIFF_LADDER = [1, 2, 4, 8, 16, 32, 64]         # 8 buckets
+NDIFF = len(DIFF_LADDER) + 1
+SIDE_LADDER = [1, 2, 4, 8]                     # 5 buckets per axis
+NSIDE = len(SIDE_LADDER) + 1
+ZERO_EXPERTS = 3
+
+# Self-correcting weighted predictor, in the style of JPEG XL's modular mode.
+# Four sub-predictors each keep a running record of how wrong they have been in
+# this neighbourhood; the blend weight is inversely proportional to that. Where
+# one sub-predictor is reliably right - a vertical edge, a smooth gradient - it
+# takes over locally without anything having to be signalled.
+#
+# The structure follows libjxl's predictor #6; the constants are tuned here
+# against the dev split rather than copied, since the surrounding model differs.
+# libjxl feeds each sub-predictor's neighbours' errors back into the
+# sub-predictions themselves (its p1C/p2C constants). Swept here across
+# 0/4/8/16 that consistently *hurt* - the blend weights already carry the error
+# information, and correcting the inputs as well double-counts it - so the
+# feedback strength is zero and only the error-weighted blending is kept.
+WP_P1 = 0
+WP_P2 = 0
+WP_MAXW = (13, 12, 12, 11)
+WP_SHIFT = 12           # dynamic range of the weights against the +4 floor
+
+
 def new_model():
     """A fresh probability bank. One bank is shared by every plane and frame."""
     return {
         "zero": rc.new_probs(KINDS * NACT * NERR * NLUM),
+        # Expert 2: directional error, which the summed error context throws away.
+        "zero_dir": rc.new_probs(KINDS * 9 * NSIDE * NSIDE),
+        # Expert 3: raw neighbour differences rather than aggregated activity.
+        "zero_diff": rc.new_probs(KINDS * NDIFF * NDIFF),
         "sign": rc.new_probs(KINDS * 9),
         "nb": rc.new_probs(KINDS * NACT * NERR * (MAX_NB + 1)),
         "mant": rc.new_probs(KINDS * (MAX_NB + 1) * 2),
+        "zero_mix": mix.Mixer(ZERO_EXPERTS, KINDS * NACT),
+        "zero_apm": mix.APM(KINDS * NACT),
+        # The magnitude bins get secondary estimation too. They are the second
+        # biggest cost after the zero flag, and a full mixer there was measured
+        # to cost more time than it returned.
+        "nb_apm": mix.APM(KINDS * (MAX_NB + 1) * NACT),
     }
+
+
+def _adapt(probs, ctx, bit):
+    """The same exponential update rc.bit applies, for models the coder no
+    longer owns: once a bit is coded from a mixed probability, each expert has
+    to be nudged by hand."""
+    p = probs[ctx]
+    if bit:
+        probs[ctx] = p - (p >> rc.ADAPT_SHIFT)
+    else:
+        probs[ctx] = p + ((rc.PROB_ONE - p) >> rc.ADAPT_SHIFT)
 
 
 def kind_offsets(kind):
@@ -78,15 +127,26 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
     the video path, where each block picks its own prediction source.
     """
     zero_p = model["zero"]
+    dir_p = model["zero_dir"]
+    diff_p = model["zero_diff"]
     sign_p = model["sign"]
     nb_p = model["nb"]
     mant_p = model["mant"]
+    zero_mix = model["zero_mix"]
+    zero_apm = model["zero_apm"]
+    nb_apm = model["nb_apm"]
     bit = coder.bit
     bypass = coder.bypass
     bisect_right = bisect.bisect_right
     act_ladder, err_ladder, lum_ladder = ACT_LADDER, ERR_LADDER, LUMA_LADDER
+    side_ladder, diff_ladder = SIDE_LADDER, DIFF_LADDER
+    stretch_t = mix.STRETCH
 
     k_zero, k_nb, k_sign, k_mant = kind_offsets(kind)
+    kind_dir = kind * 9 * NSIDE * NSIDE
+    kind_diff = kind * NDIFF * NDIFF
+    kind_mix = kind * NACT
+    kind_nbapm = kind * (MAX_NB + 1) * NACT
     if inter is not None:
         i_zero, i_nb, i_sign, i_mant = kind_offsets(kind + INTER_KIND_OFFSET)
         nbx = len(inter.modes[0])
@@ -96,6 +156,14 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
     err_rows = []
     prev = [0] * width
     prev_err = [0] * width
+
+    # Weighted-predictor history. Index x is stored at x+1 so the neighbours at
+    # x-1 and x+1 are always in range without a bounds test.
+    wp_w0, wp_w1, wp_w2, wp_w3 = WP_MAXW
+    terr_prev = [0] * (width + 2)
+    terr_cur = [0] * (width + 2)
+    werr_prev = [[0] * (width + 2) for _ in range(4)]
+    werr_cur = [[0] * (width + 2) for _ in range(4)]
 
     for y in range(height):
         cur = [0] * width
@@ -161,33 +229,115 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                     sgn = (0 if d1 < 0 else (1 if d1 == 0 else 2)) * 3 \
                         + (0 if d2 < 0 else (1 if d2 == 0 else 2))
 
+                    # Blend four sub-predictors, weighting each by how well it
+                    # has been doing right here.
+                    te_w = terr_cur[x]
+                    te_n = terr_prev[x + 1]
+                    te_nw = terr_prev[x]
+                    te_ne = terr_prev[x + 2]
+                    sum_wn = te_n + te_w
+                    q0 = west + neast - north
+                    q1 = north - (((sum_wn + te_ne) * WP_P1) >> 5)
+                    q2 = west - (((sum_wn + te_nw) * WP_P2) >> 5)
+                    q3 = pred
+                    e = werr_prev[0]
+                    a0 = werr_cur[0][x] + e[x] + e[x + 1] + e[x + 2]
+                    e = werr_prev[1]
+                    a1 = werr_cur[1][x] + e[x] + e[x + 1] + e[x + 2]
+                    e = werr_prev[2]
+                    a2 = werr_cur[2][x] + e[x] + e[x + 1] + e[x + 2]
+                    e = werr_prev[3]
+                    a3 = werr_cur[3][x] + e[x] + e[x + 1] + e[x + 2]
+                    m0 = (wp_w0 << WP_SHIFT) // (a0 + 4) + 4
+                    m1 = (wp_w1 << WP_SHIFT) // (a1 + 4) + 4
+                    m2 = (wp_w2 << WP_SHIFT) // (a2 + 4) + 4
+                    m3 = (wp_w3 << WP_SHIFT) // (a3 + 4) + 4
+                    total = m0 + m1 + m2 + m3
+                    blend = (q0 * m0 + q1 * m1 + q2 * m2 + q3 * m3 + (total >> 1)) // total
+                    # Only trust an extrapolation outside the neighbours when all
+                    # three recent errors agree in sign; otherwise rein it in.
+                    if not ((te_n >= 0) == (te_w >= 0) == (te_nw >= 0)):
+                        lo = north if north < west else west
+                        hi = north if north > west else west
+                        if neast < lo:
+                            lo = neast
+                        elif neast > hi:
+                            hi = neast
+                        if blend < lo:
+                            blend = lo
+                        elif blend > hi:
+                            blend = hi
+                    pred = 255 if blend > 255 else (0 if blend < 0 else blend)
+
             if inter is not None and mode_x[x]:
                 pred = ref_row_of_x[x][ref_col_of_x[x]]
                 b_zero, b_nb, b_sign, b_mant = i_zero, i_nb, i_sign, i_mant
             else:
                 b_zero, b_nb, b_sign, b_mant = k_zero, k_nb, k_sign, k_mant
 
+            north_err = 0 if first_row else prev_err[x]
             if first_row:
                 err_sum = west_err
             else:
-                err_sum = west_err + prev_err[x] + (prev_err[x + 1] if x + 1 < width else 0)
-            sub = bisect_right(act_ladder, act) * NERR + bisect_right(err_ladder, err_sum)
+                err_sum = west_err + north_err + (prev_err[x + 1] if x + 1 < width else 0)
+            act_b = bisect_right(act_ladder, act)
+            sub = act_b * NERR + bisect_right(err_ladder, err_sum)
             lum = bisect_right(lum_ladder, lrow[x]) if lrow is not None else 0
             zctx = b_zero + sub * NLUM + lum
             nbbase = b_nb + sub * (MAX_NB + 1)
 
+            # Three views of the same neighbourhood, mixed. They are chosen to
+            # disagree: aggregated activity, directional error, raw differences.
+            dir_ctx = (kind_dir + (sgn * NSIDE + bisect_right(side_ladder, west_err)) * NSIDE
+                       + bisect_right(side_ladder, north_err))
+            if first_row or x == 0:
+                diff_ctx = kind_diff
+            else:
+                dwn = west - north
+                dne = nwest - neast
+                diff_ctx = (kind_diff
+                            + bisect_right(diff_ladder, dwn if dwn >= 0 else -dwn) * NDIFF
+                            + bisect_right(diff_ladder, dne if dne >= 0 else -dne))
+            experts = [stretch_t[4095 - (zero_p[zctx] >> 3)],
+                       stretch_t[4095 - (dir_p[dir_ctx] >> 3)],
+                       stretch_t[4095 - (diff_p[diff_ctx] >> 3)]]
+            mix_ctx = kind_mix + act_b
+            pr1 = zero_mix.mix(experts, mix_ctx)
+            pr1 = (pr1 + 3 * zero_apm.refine(pr1, mix_ctx)) >> 2
+            if pr1 < 1:
+                pr1 = 1
+            elif pr1 > 4095:
+                pr1 = 4095
+            p_zero = (4096 - pr1) << 3
+
             if encode:
                 d = ((srow[x] - pred + 128) & 255) - 128
                 mag = -d if d < 0 else d
-                bit(zero_p, zctx, 1 if mag else 0)
+                nonzero = 1 if mag else 0
+                coder.bit_p(p_zero, nonzero)
+                _adapt(zero_p, zctx, nonzero)
+                _adapt(dir_p, dir_ctx, nonzero)
+                _adapt(diff_p, diff_ctx, nonzero)
+                zero_mix.update(nonzero)
+                zero_apm.update(nonzero)
                 if mag:
                     bit(sign_p, b_sign + sgn, 1 if d < 0 else 0)
                     v = mag - 1
                     nb = v.bit_length()
-                    for i in range(nb):
-                        bit(nb_p, nbbase + i, 1)
-                    if nb < MAX_NB:
-                        bit(nb_p, nbbase + nb, 0)
+                    limit = nb if nb < MAX_NB else nb - 1
+                    for i in range(limit + 1):
+                        more = 1 if i < nb else 0
+                        ctx = nbbase + i
+                        pr = 4095 - (nb_p[ctx] >> 3)
+                        actx = kind_nbapm + i * NACT + act_b
+                        pr = (pr + 3 * nb_apm.refine(pr, actx)) >> 2
+                        if pr < 1:
+                            pr = 1
+                        elif pr > 4095:
+                            pr = 4095
+                        coder.bit_p((4096 - pr) << 3, more)
+                        _adapt(nb_p, ctx, more)
+                        nb_apm.update(more)
                     if nb >= 2:
                         bit(mant_p, b_mant + nb * 2, (v >> (nb - 2)) & 1)
                         if nb >= 3:
@@ -196,10 +346,29 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                                 bypass(v & ((1 << (nb - 3)) - 1), nb - 3)
                 value = (pred + d) & 255
             else:
-                if bit(zero_p, zctx):
+                nonzero = coder.bit_p(p_zero)
+                _adapt(zero_p, zctx, nonzero)
+                _adapt(dir_p, dir_ctx, nonzero)
+                _adapt(diff_p, diff_ctx, nonzero)
+                zero_mix.update(nonzero)
+                zero_apm.update(nonzero)
+                if nonzero:
                     neg = bit(sign_p, b_sign + sgn)
                     nb = 0
-                    while nb < MAX_NB and bit(nb_p, nbbase + nb):
+                    while nb < MAX_NB:
+                        ctx = nbbase + nb
+                        pr = 4095 - (nb_p[ctx] >> 3)
+                        actx = kind_nbapm + nb * NACT + act_b
+                        pr = (pr + 3 * nb_apm.refine(pr, actx)) >> 2
+                        if pr < 1:
+                            pr = 1
+                        elif pr > 4095:
+                            pr = 4095
+                        more = coder.bit_p((4096 - pr) << 3)
+                        _adapt(nb_p, ctx, more)
+                        nb_apm.update(more)
+                        if not more:
+                            break
                         nb += 1
                     if nb < 2:
                         v = nb
@@ -215,6 +384,17 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                     mag = 0
                     value = pred & 255
 
+            if not first_row and x:
+                terr_cur[x + 1] = pred - value
+                d0 = q0 - value
+                d1_ = q1 - value
+                d2_ = q2 - value
+                d3_ = q3 - value
+                werr_cur[0][x + 1] = d0 if d0 >= 0 else -d0
+                werr_cur[1][x + 1] = d1_ if d1_ >= 0 else -d1_
+                werr_cur[2][x + 1] = d2_ if d2_ >= 0 else -d2_
+                werr_cur[3][x + 1] = d3_ if d3_ >= 0 else -d3_
+
             cur[x] = value
             cur_err[x] = mag
             west = value
@@ -224,5 +404,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
         err_rows.append(cur_err)
         prev = cur
         prev_err = cur_err
+        terr_prev, terr_cur = terr_cur, [0] * (width + 2)
+        werr_prev, werr_cur = werr_cur, [[0] * (width + 2) for _ in range(4)]
 
     return rows, err_rows
