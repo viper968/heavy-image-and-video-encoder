@@ -26,6 +26,8 @@ Weighing of Context Models*, the ZPAQ specification, and the FLIF/MANIAC ICIP
 | Splitting the error context into west/north | — | **+0.5% worse** | rejected |
 | Cross-channel context on the magnitude bins | — | **+0.2% worse** | rejected |
 | Online learned context tree (MANIAC-style) | the big one, see below | **-0.1%** | rejected |
+| Match model as a mixer expert | the one I'd bet on | **-0.2%** on photos, **8.7x** on repetition | kept |
+| Match value averaged into the predictor blend | — | **+1.3% worse** | rejected |
 
 ### The three that failed are the informative ones
 
@@ -54,6 +56,50 @@ predictor's max neighbour error — the property libjxl's tree builder ranks
 highest — returned 13 bytes on a 464KB image. That context is nearly a
 restatement of the neighbour-error context expert 1 already uses. Mixing only
 pays when the experts genuinely disagree.
+
+## The match model: the one that needed a different combiner
+
+Every other expert reads the same handful of adjacent pixels, so they mostly
+agree and mixing them pays little. The match model looks somewhere else: it
+hashes the causal neighbourhood (W, N, NW, NE), remembers where that exact
+neighbourhood last occurred anywhere earlier in the plane, and offers the pixel
+that followed it last time.
+
+Three combiners were tried, and the difference between them is the whole story.
+
+**As a mixer expert only** (predicting just *is the residual zero*): -0.2% on
+photographs, but only 2.9% on a tiled noise image — an image built to be
+spatially incompressible and perfectly repetitive, where a match model should
+win overwhelmingly. It was finding the matches and then throwing the answer
+away: knowing the residual is zero is worth about one bit, while knowing *what
+the pixel is* is worth eight.
+
+**Averaged into the weighted predictor blend**, alongside the four gradient
+sub-predictors: **1.3% worse**. The blend weights each vote by its recent local
+accuracy, which is the right combiner for four predictors that are all roughly
+right. A match is not like that — it is either exactly right or wildly wrong,
+and averaging a wildly wrong value into an otherwise good prediction damages
+every pixel it touches. Relaxing the blend's clamp to let confident matches
+through changed nothing, confirming the averaging itself was the problem.
+
+**As a hard switch on sustained agreement** — once a match has held for N
+consecutive pixels it replaces the prediction outright — the tiled image drops
+from 108,658 bytes to 12,554, **8.7x**, while photographs pay 0.009%.
+
+N trades one against the other, swept on the dev split:
+
+| trust threshold | photograph | tiled noise |
+|---|---:|---:|
+| 2 | +1.8% | 6,075 |
+| 4 | +0.24% | 8,248 |
+| **8** | **+0.009%** | **12,554** |
+| 16 | +0.000% | 21,289 |
+| never | baseline | 108,658 |
+
+8, because losing on photographs to win elsewhere is not a trade worth making.
+The lesson generalises: a bimodal predictor needs a switch, not an average, and
+the reason the first two attempts underperformed was the combiner rather than
+the model.
 
 ## The learned context tree: built, measured, rejected
 
@@ -111,18 +157,19 @@ tree* rather than a fixed grid:
 That was built here and did not pay (above). What is left, in the order I would
 try it:
 
-1. **More genuinely different experts.** Every expert added so far keyed on the
-   same neighbourhood statistics and the returns collapsed accordingly. The
-   experts that would actually disagree are ones seeing different *data*: a
-   match model (has this exact neighbourhood pattern occurred before in this
-   image, and what followed it?), and a longer-range model reaching several
-   rows up. paq8px carries ~130 predictors for exactly this reason.
-2. **Mixing on the magnitude bins**, not just secondary estimation. The bins
+1. **Condition the sign and magnitude bins on the match too.** The match model
+   now replaces the prediction when it is confident, but when it is only
+   *fairly* confident its answer still implies an expected residual, and the
+   sign and magnitude bins currently ignore that entirely. This is the same
+   mistake the expert-only version made, one level down.
+2. **A longer-range model** reaching several rows up, and more predictors
+   generally — paq8px carries ~130 for this reason.
+3. **Mixing on the magnitude bins**, not just secondary estimation. The bins
    currently have one context model each; they are the second largest cost in
    the file.
-3. **A second mixing layer**, which every serious context-mixing compressor
+4. **A second mixing layer**, which every serious context-mixing compressor
    has and which no source I found isolates a number for.
-4. **The hybrid-uint token design** — give small residuals their own jointly
+5. **The hybrid-uint token design** — give small residuals their own jointly
    modelled symbol instead of decomposing every one into is-zero / sign /
    unary. Structurally strictly stronger than the current binarisation.
 

@@ -134,12 +134,19 @@ and several of them can be *mixed* per bit rather than one being chosen.
    local gradient activity, how badly neighbouring pixels were predicted, and —
    for chroma — how badly the co-located luma pixel was predicted. Chroma tends
    to go wrong exactly where luma did.
-4. **Context mixing** (`hve/mix.py`) — the zero flag, which every pixel pays,
-   is predicted by three experts that view the neighbourhood differently and
-   combined by an LPAQ-style logistic mixer whose weights are learned online and
-   selected by context. A secondary estimation stage (APM/SSE) then corrects the
-   result's calibration, on the zero flag and the magnitude bins alike.
-5. **Adaptive binary range coder** (`hve/rc.py`) — LZMA-style, 15-bit
+4. **Match model** (`hve/model.py`) — hashes the causal neighbourhood and
+   remembers where that exact neighbourhood last occurred anywhere earlier in
+   the plane. Once its answer has held for eight consecutive pixels it replaces
+   the prediction outright. Gradient predictors cannot see repetition; this
+   makes spatially incompressible but repetitive content — tiled textures,
+   lettering, screenshots — collapse by an order of magnitude.
+5. **Context mixing** (`hve/mix.py`) — the zero flag, which every pixel pays,
+   is predicted by four experts that view the neighbourhood differently
+   (including the match model) and combined by an LPAQ-style logistic mixer
+   whose weights are learned online and selected by context. A secondary
+   estimation stage (APM/SSE) then corrects the result's calibration, on the
+   zero flag and the magnitude bins alike.
+6. **Adaptive binary range coder** (`hve/rc.py`) — LZMA-style, 15-bit
    probabilities, no transmitted tables.
 
 **Video** (`hve/video.py`)
@@ -181,8 +188,8 @@ are coded at their native subsampled size.
 ```
 hve/rc.py           adaptive binary range coder (the entropy engine)
 hve/mix.py          logistic mixing + secondary estimation (stretch/squash, Mixer, APM)
-hve/model.py        weighted predictor, context model, residual binarisation —
-                    one loop, shared by the image and video paths
+hve/model.py        weighted predictor, match model, context model, residual
+                    binarisation — one loop, shared by image and video paths
 hve/image.py        .hvi still-image container
 hve/video.py        .hvv video container, motion search, block modes
 hve/transform.py    RCT, MED predictor, context quantisation
@@ -197,7 +204,7 @@ tools/headroom.py   ideal cost per predictor: is the gap in prediction or coding
 tools/ctx_study.py, tools/pred_study.py, tools/tune.py   the design experiments
 docs/research.md    every technique surveyed and what it measured — including the
                     ones that made things worse
-tests/              34 tests: roundtrips, edge cases, coder internals
+tests/              36 tests: roundtrips, edge cases, coder internals
 ```
 
 ## Running it

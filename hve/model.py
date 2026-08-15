@@ -16,6 +16,7 @@ well-modelled binary decision.
 """
 
 import bisect
+from array import array
 
 from . import mix, rc
 
@@ -39,7 +40,31 @@ DIFF_LADDER = [1, 2, 4, 8, 16, 32, 64]         # 8 buckets
 NDIFF = len(DIFF_LADDER) + 1
 SIDE_LADDER = [1, 2, 4, 8]                     # 5 buckets per axis
 NSIDE = len(SIDE_LADDER) + 1
-ZERO_EXPERTS = 3
+ZERO_EXPERTS = 4
+
+# Match model. Every other expert reads the same handful of adjacent pixels, so
+# they mostly agree and mixing them pays little. This one looks somewhere else
+# entirely: it hashes the causal neighbourhood, remembers where that exact
+# neighbourhood last occurred anywhere earlier in the plane, and offers the
+# pixel that followed it last time. On repeated structure - fabric, brickwork,
+# lettering, anything periodic - it knows things no gradient can.
+MATCH_HASH_BITS = 20
+MATCH_HASH_MASK = (1 << MATCH_HASH_BITS) - 1
+MATCH_MAX_LEN = 7        # match lengths saturate here; longer is not more certain
+# Context is (how long the match has held) x (does it agree with the predictor).
+NMATCH = 1 + (MATCH_MAX_LEN + 1) * 3
+# Once a match has held this many pixels it replaces the prediction outright.
+#
+# Averaging it into the weighted blend instead was measured and was much worse
+# (+1.3%): a match is either exactly right or wildly wrong, and averaging a
+# wildly wrong value into an otherwise good prediction damages every pixel it
+# touches. A hard switch on sustained agreement is the right combiner.
+#
+# The threshold trades photographs against repetitive content. Swept on the dev
+# split: at 2 a photo pays 1.8% and tiled noise costs 6.1KB; at 8 the photo pays
+# 0.009% and tiled noise costs 12.6KB, still 8.7x better than without the model.
+# Losing on photographs to win elsewhere is not a trade worth making, so 8.
+MATCH_TRUST = 8
 
 # Self-correcting weighted predictor, in the style of JPEG XL's modular mode.
 # Four sub-predictors each keep a running record of how wrong they have been in
@@ -68,6 +93,8 @@ def new_model():
         "zero_dir": rc.new_probs(KINDS * 9 * NSIDE * NSIDE),
         # Expert 3: raw neighbour differences rather than aggregated activity.
         "zero_diff": rc.new_probs(KINDS * NDIFF * NDIFF),
+        # Expert 4: the match model.
+        "zero_match": rc.new_probs(KINDS * NMATCH),
         "sign": rc.new_probs(KINDS * 9),
         "nb": rc.new_probs(KINDS * NACT * NERR * (MAX_NB + 1)),
         "mant": rc.new_probs(KINDS * (MAX_NB + 1) * 2),
@@ -129,6 +156,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
     zero_p = model["zero"]
     dir_p = model["zero_dir"]
     diff_p = model["zero_diff"]
+    match_p = model["zero_match"]
     sign_p = model["sign"]
     nb_p = model["nb"]
     mant_p = model["mant"]
@@ -145,6 +173,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
     k_zero, k_nb, k_sign, k_mant = kind_offsets(kind)
     kind_dir = kind * 9 * NSIDE * NSIDE
     kind_diff = kind * NDIFF * NDIFF
+    kind_match = kind * NMATCH
     kind_mix = kind * NACT
     kind_nbapm = kind * (MAX_NB + 1) * NACT
     if inter is not None:
@@ -156,6 +185,16 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
     err_rows = []
     prev = [0] * width
     prev_err = [0] * width
+
+    # Match-model state. `flat` is every pixel decoded so far in raster order;
+    # `match_table` maps a neighbourhood hash to the position that followed that
+    # neighbourhood last time. Both sides build these from decoded values only.
+    match_table = array("i", [0]) * (MATCH_HASH_MASK + 1)
+    flat = []
+    flat_append = flat.append
+    match_pos = 0
+    match_len = 0
+    hash_mask = MATCH_HASH_MASK
 
     # Weighted-predictor history. Index x is stored at x+1 so the neighbours at
     # x-1 and x+1 are always in range without a bounds test.
@@ -195,6 +234,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
         first_row = y == 0
 
         for x in range(width):
+            mval = -1
             if first_row:
                 pred = 128 if x == 0 else west
                 act = 0
@@ -269,6 +309,16 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                             blend = hi
                     pred = 255 if blend > 255 else (0 if blend < 0 else blend)
 
+            if not first_row and x:
+                # Match model: where did this exact neighbourhood last occur?
+                mhash = ((west * 0x2F0FD693 + north * 0x9E3779B1
+                          + nwest * 0x85EBCA77 + neast * 0xC2B2AE3D) >> 8) & hash_mask
+                if not match_len:
+                    match_pos = match_table[mhash]
+                if 0 < match_pos < len(flat):
+                    mval = flat[match_pos]
+                match_table[mhash] = len(flat)
+
             if inter is not None and mode_x[x]:
                 pred = ref_row_of_x[x][ref_col_of_x[x]]
                 b_zero, b_nb, b_sign, b_mant = i_zero, i_nb, i_sign, i_mant
@@ -298,9 +348,19 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 diff_ctx = (kind_diff
                             + bisect_right(diff_ladder, dwn if dwn >= 0 else -dwn) * NDIFF
                             + bisect_right(diff_ladder, dne if dne >= 0 else -dne))
+            if mval < 0:
+                match_ctx = kind_match
+            else:
+                agree = 0 if mval == pred else (1 if -3 < mval - pred < 3 else 2)
+                hit = match_len if match_len < MATCH_MAX_LEN else MATCH_MAX_LEN
+                match_ctx = kind_match + 1 + hit * 3 + agree
+                if match_len >= MATCH_TRUST:
+                    pred = mval
+
             experts = [stretch_t[4095 - (zero_p[zctx] >> 3)],
                        stretch_t[4095 - (dir_p[dir_ctx] >> 3)],
-                       stretch_t[4095 - (diff_p[diff_ctx] >> 3)]]
+                       stretch_t[4095 - (diff_p[diff_ctx] >> 3)],
+                       stretch_t[4095 - (match_p[match_ctx] >> 3)]]
             mix_ctx = kind_mix + act_b
             pr1 = zero_mix.mix(experts, mix_ctx)
             pr1 = (pr1 + 3 * zero_apm.refine(pr1, mix_ctx)) >> 2
@@ -318,6 +378,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 _adapt(zero_p, zctx, nonzero)
                 _adapt(dir_p, dir_ctx, nonzero)
                 _adapt(diff_p, diff_ctx, nonzero)
+                _adapt(match_p, match_ctx, nonzero)
                 zero_mix.update(nonzero)
                 zero_apm.update(nonzero)
                 if mag:
@@ -350,6 +411,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 _adapt(zero_p, zctx, nonzero)
                 _adapt(dir_p, dir_ctx, nonzero)
                 _adapt(diff_p, diff_ctx, nonzero)
+                _adapt(match_p, match_ctx, nonzero)
                 zero_mix.update(nonzero)
                 zero_apm.update(nonzero)
                 if nonzero:
@@ -394,6 +456,13 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 werr_cur[1][x + 1] = d1_ if d1_ >= 0 else -d1_
                 werr_cur[2][x + 1] = d2_ if d2_ >= 0 else -d2_
                 werr_cur[3][x + 1] = d3_ if d3_ >= 0 else -d3_
+
+            if mval == value:
+                match_pos += 1
+                match_len += 1
+            else:
+                match_len = 0
+            flat_append(value)
 
             cur[x] = value
             cur_err[x] = mag

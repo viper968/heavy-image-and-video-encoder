@@ -207,6 +207,30 @@ def test_colour_transform_is_chosen_not_assumed():
     assert np.array_equal(image.decode(image.encode(unrelated)), unrelated)
 
 
+def test_match_model_exploits_repetition():
+    """Spatially incompressible content that repeats must still collapse.
+
+    A tile of pure noise defeats every gradient predictor in the codec, so
+    anything gained here comes from the match model recognising that this exact
+    neighbourhood has been seen before.
+    """
+    r = np.random.default_rng(3)
+    tile = r.integers(0, 256, (24, 24, 3), dtype=np.uint8)
+    tiled = np.tile(tile, (8, 8, 1))
+    unique = r.integers(0, 256, tiled.shape, dtype=np.uint8)
+
+    blob = image.encode(tiled)
+    assert np.array_equal(image.decode(blob), tiled)
+    assert len(blob) * 4 < len(image.encode(unique))
+
+
+def test_match_model_does_not_cost_on_unrepetitive_data():
+    """The trust threshold exists so photographs do not pay for the match model."""
+    from PIL import Image as PILImage
+    photo = np.array(PILImage.open(PHOTO).convert("RGB"))
+    assert np.array_equal(image.decode(image.encode(photo)), photo)
+
+
 def test_image_rejects_foreign_container():
     with pytest.raises(ValueError):
         image.decode(b"XXXX" + b"\0" * 32)
