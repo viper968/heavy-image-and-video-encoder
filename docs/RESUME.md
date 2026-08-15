@@ -21,7 +21,7 @@ Environment notes for this machine:
   (24 Kodak images + 2 Xiph clips, ~100MB).
 - Git pushes need `gh auth setup-git` once.
 
-## The task in progress: JIT the pixel loop
+## The task in progress: JIT the pixel loop  (kernel DONE, not yet wired in)
 
 **Why.** The codec spends ~10s encoding and ~9s decoding one 768x512 photo. It
 is a pure-Python per-pixel loop, and every remaining compression idea needs A/B
@@ -57,9 +57,31 @@ construction. `>>` and `//` on negatives floor identically in both, so the
 weighted-predictor blend and the video motion-vector scaling are safe. The
 byte-exactness test is what actually proves this.
 
-**Definition of done.** `.venv/bin/python -m pytest tests -q` green, including a
-new test asserting the jitted and reference paths produce identical bytes on
-several images, and a measured encode time well under 1s per Kodak photo.
+**Progress so far.** `hve/fast.py` exists and works. It holds the whole
+still-image path — range coder, mixer, APM, weighted predictor, match model,
+all of it — as one numba kernel over flat numpy arrays. Two tests in the suite
+(`test_fast_path_is_byte_identical`, `test_fast_path_roundtrips`) confirm it
+emits **byte-identical** payloads to the reference on a photo crop, a synthetic
+image and pure noise, and that it round-trips. 38 tests green.
+
+**What is left, in order:**
+
+1. **Wire it into `hve/image.py`.** `encode()` should call
+   `fast.encode_planes(planes)` instead of its own `for plane in planes:
+   model.code_plane(...)` loop when `fast.available()`, and `decode()` should
+   call `fast.decode_planes(payload, channels, height, width)`. Keep the
+   reference loop as the fallback. Nothing else in the container format changes
+   — `fast.encode_planes` returns exactly the bytes `coder.finish()` returned.
+2. **Measure.** Time one Kodak photo before/after, then re-run
+   `.venv/bin/python tools/bench_image.py --jobs=12 test` and update the README
+   timing claims. Expect the ~10s encode to drop to well under 1s; the
+   micro-benchmark suggested ~100x on the loop itself.
+3. **Then video.** `hve/video.py` still uses the reference path via
+   `model.code_plane(..., inter=...)`. The kernel does not handle the `inter`
+   block-mode branch yet; adding it is the same mirroring exercise.
+
+**Definition of done.** Suite green including the byte-exactness tests, image
+encode well under 1s per Kodak photo, README timings updated.
 
 ## After that, in order
 

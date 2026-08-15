@@ -231,6 +231,53 @@ def test_match_model_does_not_cost_on_unrepetitive_data():
     assert np.array_equal(image.decode(image.encode(photo)), photo)
 
 
+def _reference_payload(planes):
+    """The pure-Python path, run directly, for comparison against the jitted one."""
+    from hve import rc as _rc
+    coder = _rc.Encoder()
+    bank = model.new_model()
+    luma = None
+    h, w = planes.shape[1], planes.shape[2]
+    for i, plane in enumerate(planes):
+        _, err = model.code_plane(coder, True, w, h, min(i, 3), bank,
+                                  src=plane.tolist(),
+                                  luma_err=luma if i in (1, 2) else None)
+        if i == 0:
+            luma = err
+    return coder.finish()
+
+
+def test_fast_path_is_byte_identical():
+    """The jitted path is a second implementation of the format's core loop.
+
+    A one-bit divergence would silently corrupt every file written by whichever
+    path happened to run, so the two must agree exactly, not merely closely.
+    """
+    from hve import fast
+    if not fast.available():
+        pytest.skip("numba not installed")
+    from PIL import Image as PILImage
+    cases = [np.array(PILImage.open(PHOTO).convert("RGB"))[:48, :64],
+             synthetic(33, 51, 3),
+             np.random.default_rng(7).integers(0, 256, (24, 24, 3), dtype=np.uint8)]
+    for img in cases:
+        planes, _ = image._planes_from_image(img)
+        planes = np.ascontiguousarray(planes)
+        assert fast.encode_planes(planes) == _reference_payload(planes)
+
+
+def test_fast_path_roundtrips():
+    from hve import fast
+    if not fast.available():
+        pytest.skip("numba not installed")
+    img = synthetic(40, 56, 3)
+    planes, _ = image._planes_from_image(img)
+    planes = np.ascontiguousarray(planes)
+    blob = fast.encode_planes(planes)
+    back = fast.decode_planes(blob, planes.shape[0], planes.shape[1], planes.shape[2])
+    assert np.array_equal(back, planes)
+
+
 def test_image_rejects_foreign_container():
     with pytest.raises(ValueError):
         image.decode(b"XXXX" + b"\0" * 32)
