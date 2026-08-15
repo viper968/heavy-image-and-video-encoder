@@ -7,8 +7,6 @@ residuals can still be coded in plain raster order and keep full access to their
 spatial neighbours.
 """
 
-import bisect
-
 import numpy as np
 
 from . import model, rc
@@ -21,11 +19,8 @@ BLOCK = 16
 SEARCH = 8
 
 MODE_SPATIAL = 0
-MODE_TEMPORAL = 1
+MODE_TEMPORAL = model.MODE_TEMPORAL
 
-# Model kinds 0-3 are the intra banks from model.py; 4-7 mirror them for
-# temporally predicted pixels, whose residuals have quite different statistics.
-INTER_KIND_OFFSET = 4
 MV_MAX = 2 * SEARCH
 
 _COST = np.round(np.log2(1.0 + np.arange(129)) * 8).astype(np.int32)
@@ -167,166 +162,6 @@ def code_block_info(coder, encode, bank, nby, nbx, modes=None, mvs=None):
 
 
 # --------------------------------------------------------------------------
-# pixel coding
-
-
-def code_inter_plane(coder, encode, width, height, kind, bank, modes, mvs,
-                     bs_y, bs_x, mv_sy, mv_sx, ref_rows, src=None, luma_err=None):
-    """Raster-order pixel coding where each block's prediction source varies.
-
-    `bs_y`/`bs_x` are this plane's block size and `mv_sy`/`mv_sx` the motion
-    vector divisors, so a subsampled chroma plane reuses the luma decisions.
-    """
-    zero_p = bank["zero"]
-    sign_p = bank["sign"]
-    nb_p = bank["nb"]
-    mant_p = bank["mant"]
-    bit = coder.bit
-    bypass = coder.bypass
-    bisect_right = bisect.bisect_right
-    act_ladder, err_ladder, lum_ladder = model.ACT_LADDER, model.ERR_LADDER, model.LUMA_LADDER
-    nerr, nlum, max_nb = model.NERR, model.NLUM, model.MAX_NB
-    nact = model.NACT
-
-    def kind_offsets(k):
-        return (k * nact * nerr * nlum, k * nact * nerr * (max_nb + 1),
-                k * 9, k * (max_nb + 1))
-
-    off_intra = kind_offsets(kind)
-    off_inter = kind_offsets(kind + INTER_KIND_OFFSET)
-
-    rows = []
-    err_rows = []
-    prev = [0] * width
-    prev_err = [0] * width
-    nbx = len(modes[0])
-
-    for y in range(height):
-        cur = [0] * width
-        cur_err = [0] * width
-        srow = src[y] if encode else None
-        lrow = luma_err[y] if luma_err is not None else None
-        by = min(y // bs_y, len(modes) - 1)
-        mode_row = modes[by]
-        mv_row = mvs[by]
-
-        # Per-row lookup tables: which reference row and column each pixel reads.
-        mode_x = [0] * width
-        ref_row_of_x = [None] * width
-        ref_col_of_x = [0] * width
-        for x in range(width):
-            bx = min(x // bs_x, nbx - 1)
-            if mode_row[bx] == MODE_TEMPORAL:
-                mode_x[x] = 1
-                ry = y + int(mv_row[bx][0]) // mv_sy
-                rx = x + int(mv_row[bx][1]) // mv_sx
-                ref_row_of_x[x] = ref_rows[0 if ry < 0 else (height - 1 if ry >= height else ry)]
-                ref_col_of_x[x] = 0 if rx < 0 else (width - 1 if rx >= width else rx)
-
-        west = 0
-        west_err = 0
-        first_row = y == 0
-
-        for x in range(width):
-            if first_row:
-                spatial_pred = 128 if x == 0 else west
-                act = 0
-                sgn = 4
-            else:
-                north = prev[x]
-                if x == 0:
-                    spatial_pred = north
-                    act = 0
-                    sgn = 4
-                else:
-                    nwest = prev[x - 1]
-                    neast = prev[x + 1] if x + 1 < width else north
-                    if nwest >= north:
-                        if nwest >= west:
-                            spatial_pred = north if north < west else west
-                        else:
-                            spatial_pred = north + west - nwest
-                    elif nwest <= west:
-                        spatial_pred = north if north > west else west
-                    else:
-                        spatial_pred = north + west - nwest
-                    if spatial_pred > 255:
-                        spatial_pred = 255
-                    elif spatial_pred < 0:
-                        spatial_pred = 0
-                    d1 = ((west - nwest + 128) & 255) - 128
-                    d2 = ((nwest - north + 128) & 255) - 128
-                    d3 = ((north - neast + 128) & 255) - 128
-                    act = ((d1 if d1 >= 0 else -d1) + (d2 if d2 >= 0 else -d2)
-                           + (d3 if d3 >= 0 else -d3))
-                    sgn = (0 if d1 < 0 else (1 if d1 == 0 else 2)) * 3 \
-                        + (0 if d2 < 0 else (1 if d2 == 0 else 2))
-
-            if mode_x[x]:
-                pred = ref_row_of_x[x][ref_col_of_x[x]]
-                k_zero, k_nb, k_sign, k_mant = off_inter
-            else:
-                pred = spatial_pred
-                k_zero, k_nb, k_sign, k_mant = off_intra
-
-            if first_row:
-                err_sum = west_err
-            else:
-                err_sum = west_err + prev_err[x] + (prev_err[x + 1] if x + 1 < width else 0)
-            sub = bisect_right(act_ladder, act) * nerr + bisect_right(err_ladder, err_sum)
-            lum = bisect_right(lum_ladder, lrow[x]) if lrow is not None else 0
-            zctx = k_zero + sub * nlum + lum
-            nbbase = k_nb + sub * (max_nb + 1)
-
-            if encode:
-                d = ((srow[x] - pred + 128) & 255) - 128
-                mag = -d if d < 0 else d
-                bit(zero_p, zctx, 1 if mag else 0)
-                if mag:
-                    bit(sign_p, k_sign + sgn, 1 if d < 0 else 0)
-                    v = mag - 1
-                    nb = v.bit_length()
-                    for i in range(nb):
-                        bit(nb_p, nbbase + i, 1)
-                    if nb < max_nb:
-                        bit(nb_p, nbbase + nb, 0)
-                    if nb >= 2:
-                        bit(mant_p, k_mant + nb, (v >> (nb - 2)) & 1)
-                        if nb > 2:
-                            bypass(v & ((1 << (nb - 2)) - 1), nb - 2)
-                value = (pred + d) & 255
-            else:
-                if bit(zero_p, zctx):
-                    neg = bit(sign_p, k_sign + sgn)
-                    nb = 0
-                    while nb < max_nb and bit(nb_p, nbbase + nb):
-                        nb += 1
-                    if nb < 2:
-                        v = nb
-                    else:
-                        top = bit(mant_p, k_mant + nb)
-                        rest = bypass(nb - 2) if nb > 2 else 0
-                        v = (1 << (nb - 1)) | (top << (nb - 2)) | rest
-                    mag = v + 1
-                    value = (pred - mag if neg else pred + mag) & 255
-                else:
-                    mag = 0
-                    value = pred & 255
-
-            cur[x] = value
-            cur_err[x] = mag
-            west = value
-            west_err = mag
-
-        rows.append(cur)
-        err_rows.append(cur_err)
-        prev = cur
-        prev_err = cur_err
-
-    return rows, err_rows
-
-
-# --------------------------------------------------------------------------
 # container
 
 
@@ -385,10 +220,11 @@ def encode(frames, progress=None):
                 ph, pw = plane.shape
                 sy = max(1, luma_h // ph)
                 sx = max(1, luma_w // pw)
-                _, err = code_inter_plane(coder, True, pw, ph, min(i, 3), bank,
-                                          modes.tolist(), mvs.tolist(),
-                                          max(1, block // sy), max(1, block // sx),
-                                          sy, sx, prev_rows[i], src=plane.tolist(),
+                inter = model.InterInfo(modes.tolist(), mvs.tolist(),
+                                        max(1, block // sy), max(1, block // sx),
+                                        sy, sx, prev_rows[i])
+                _, err = model.code_plane(coder, True, pw, ph, min(i, 3), bank,
+                                          src=plane.tolist(), inter=inter,
                                           luma_err=luma_err if i in (1, 2) else None)
                 rows_all.append(plane.tolist())
                 if i == 0:
@@ -443,10 +279,10 @@ def decode(data, progress=None):
             for i, (ph, pw) in enumerate(shapes):
                 sy = max(1, luma_h // ph)
                 sx = max(1, luma_w // pw)
-                rows, err = code_inter_plane(coder, False, pw, ph, min(i, 3), bank,
-                                             modes, mvs, max(1, block // sy),
-                                             max(1, block // sx), sy, sx,
-                                             prev_rows[i],
+                inter = model.InterInfo(modes, mvs, max(1, block // sy),
+                                        max(1, block // sx), sy, sx, prev_rows[i])
+                rows, err = model.code_plane(coder, False, pw, ph, min(i, 3), bank,
+                                             inter=inter,
                                              luma_err=luma_err if i in (1, 2) else None)
                 rows_all.append(rows)
                 if i == 0:
