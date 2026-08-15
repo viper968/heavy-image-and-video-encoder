@@ -27,7 +27,6 @@ def shift(p, dy, dx):
     """Causal neighbour with edge replication."""
     h, w = p.shape
     out = np.empty_like(p)
-    src = p[max(0, -0):h - dy, :] if dy else p
     if dy:
         out[dy:, :] = p[:h - dy, :]
         out[:dy, :] = p[0:1, :]

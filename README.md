@@ -15,17 +15,25 @@ python -m hve info   photo.hvi
 
 ## Results
 
-### Images — 6 photos from the Kodak set (2.36M pixels, 7,077,888 raw bytes)
+### Images — 18 held-out Kodak photos (7.08M pixels, 21,233,664 raw bytes)
+
+Every constant in this codec was chosen by measuring compressed size, so the six
+images used for tuning cannot also carry the headline number. These 18 are the
+held-out split (`tools/corpus.py`); no parameter has ever been fitted to them.
 
 | codec | bytes | bpp | ratio | verified |
 |---|---:|---:|---:|---|
-| AVIF "lossless" (Pillow) | 1,952,111 | 6.62 | 3.63x | **not actually lossless** (max err 72) |
-| JPEG XL, effort 7 | 2,863,336 | 9.71 | 2.47x | lossless |
-| **hve** | **3,065,681** | **10.40** | **2.31x** | lossless |
-| WebP lossless | 3,104,180 | 10.53 | 2.28x | lossless |
-| PNG (optimised) | 4,488,577 | 15.22 | 1.58x | lossless |
+| AVIF "lossless" (Pillow) | 4,915,600 | 5.56 | 4.32x | **not actually lossless** (max err 55) |
+| JPEG XL, effort 9 | 7,346,399 | 8.30 | 2.89x | lossless |
+| JPEG XL, effort 7 | 7,406,679 | 8.37 | 2.87x | lossless |
+| **hve** | **7,875,009** | **8.90** | **2.70x** | lossless |
+| WebP lossless | 8,099,860 | 9.16 | 2.62x | lossless |
+| PNG (optimised) | 11,321,001 | 12.80 | 1.88x | lossless |
 
-31.7% smaller than PNG, 1.2% smaller than lossless WebP, 7.1% larger than JPEG XL.
+30.4% smaller than PNG, 2.8% smaller than lossless WebP, 7.2% larger than
+JPEG XL. **JPEG XL is still ahead** — `docs/research.md` records what was tried
+against that gap, what each technique was worth when measured, and what is
+left.
 
 ### Video — 16 frames of `akiyo_cif` (352x288 YUV420, 2,433,024 raw bytes)
 
@@ -79,9 +87,9 @@ sounds, and `tools/ladder.py` measures why. On the same 6 photos:
 | huffman-global | 6,680,683 | 22.653 | -5.6% | one Huffman tree over all bytes |
 | huffman-perchan | 6,574,377 | 22.293 | -1.6% | **a tree per colour channel — the original idea** |
 | huffman-med | 4,679,107 | 15.866 | -28.8% | + MED spatial prediction first |
-| huffman-rct-med | 3,338,822 | 11.321 | -28.6% | + reversible colour transform |
-| rans-ctx | 3,166,512 | 10.737 | -5.2% | + context-modelled static rANS |
-| **hve** | **3,065,681** | **10.395** | -3.2% | + adaptive contexts, cross-channel, sign modelling |
+| huffman-rct-med | 3,319,109 | 11.255 | -29.1% | + reversible colour transform |
+| rans-ctx | 3,150,770 | 10.684 | -5.1% | + context-modelled static rANS |
+| **hve** | **3,005,344** | **10.191** | -4.6% | + weighted prediction, adaptive contexts, mixing |
 
 Per-channel Huffman on raw pixel values buys **7.1% total**, and splitting the
 tree per channel accounts for only 1.6 points of that. The reason is that the
@@ -104,7 +112,8 @@ Two further limits of Huffman show up after that:
 Both are why the final codec uses an **adaptive binary range coder**: it
 transmits no tables at all, because encoder and decoder learn identical
 probabilities from the pixels they have already processed. Contexts become free,
-so the model carries ~10,000 adaptive probability slots and pays nothing for them.
+so the model carries ~10,000 adaptive probability slots and pays nothing for them,
+and several of them can be *mixed* per bit rather than one being chosen.
 
 ## How it works
 
@@ -115,16 +124,22 @@ so the model carries ~10,000 adaptive probability slots and pays nothing for the
    and nothing is lost. The encoder measures residual entropy with and without
    it and sets a header flag, because on images whose channels do not correlate
    the transform is a loss.
-2. **MED prediction** (`hve/transform.py`) — the JPEG-LS median edge detector
-   predicts each pixel from its west, north and north-west neighbours, picking
-   the right neighbour across a detected edge and a planar extrapolation
-   otherwise.
+2. **Self-correcting weighted prediction** (`hve/model.py`) — four
+   sub-predictors (the JPEG-LS median edge detector, `W + NE - N`, north and
+   west) are blended, each weighted by how wrong it has recently been *right
+   here*. Where one is reliably right — a vertical edge, a smooth gradient — it
+   takes over locally with nothing signalled.
 3. **Context modelling** (`hve/model.py`) — the residual is coded as
    *is-it-zero* / *sign* / *bit-length* / *mantissa*, with contexts drawn from
    local gradient activity, how badly neighbouring pixels were predicted, and —
    for chroma — how badly the co-located luma pixel was predicted. Chroma tends
    to go wrong exactly where luma did.
-4. **Adaptive binary range coder** (`hve/rc.py`) — LZMA-style, 15-bit
+4. **Context mixing** (`hve/mix.py`) — the zero flag, which every pixel pays,
+   is predicted by three experts that view the neighbourhood differently and
+   combined by an LPAQ-style logistic mixer whose weights are learned online and
+   selected by context. A secondary estimation stage (APM/SSE) then corrects the
+   result's calibration, on the zero flag and the magnitude bins alike.
+5. **Adaptive binary range coder** (`hve/rc.py`) — LZMA-style, 15-bit
    probabilities, no transmitted tables.
 
 **Video** (`hve/video.py`)
@@ -142,12 +157,16 @@ are coded at their native subsampled size.
 
 ## Honest limitations
 
-- **It is slow.** This is a readable Python reference implementation: 3.2s to
-  encode and 2.6s to decode a 768x512 photo, and about 0.7s per CIF video frame. The algorithms are all O(pixels) — the constant is Python. A C port
+- **It is slow, and got slower.** This is a readable Python reference
+  implementation: ~25s to encode a 768x512 photo, up from 3.2s before the
+  mixing layer went in — context mixing and secondary estimation run per coded
+  bit. Video is about 1.6s per CIF frame. The algorithms are all O(pixels) — the constant is Python. A C port
   would land in the same class as the codecs it is compared against.
-- **JPEG XL still wins on stills** by 7%. Closing that gap needs context
-  *mixing* (blending several models per pixel) and a self-correcting predictor,
-  both of which are a further large step in complexity and decode time.
+- **JPEG XL still wins on stills** by 7.2% on held-out images. Context mixing,
+  secondary estimation, a self-correcting weighted predictor and an online
+  learned context tree were all built and measured against that gap; the first
+  three are in, the fourth was not worth its cost. See `docs/research.md` for
+  every number, including the techniques that made things *worse*.
 - **Video uses only the previous frame**, full-pel motion, one block size, and
   no bidirectional prediction. x264's lossless mode remains slightly ahead, and
   on high-motion content the margin is wider (see `results/video_foreman.txt`).
@@ -161,7 +180,9 @@ are coded at their native subsampled size.
 
 ```
 hve/rc.py           adaptive binary range coder (the entropy engine)
-hve/model.py        context model + residual binarisation, shared by both directions
+hve/mix.py          logistic mixing + secondary estimation (stretch/squash, Mixer, APM)
+hve/model.py        weighted predictor, context model, residual binarisation —
+                    one loop, shared by the image and video paths
 hve/image.py        .hvi still-image container
 hve/video.py        .hvv video container, motion search, block modes
 hve/transform.py    RCT, MED predictor, context quantisation
@@ -171,8 +192,12 @@ hve/y4m.py          YUV4MPEG2 reader/writer
 hve/cli.py          command line interface
 tools/ladder.py     measures every rung from Huffman to the final codec
 tools/bench_image.py, tools/bench_video.py    benchmarks with losslessness verified
+tools/corpus.py     the dev / held-out split, so tuning cannot flatter the results
+tools/headroom.py   ideal cost per predictor: is the gap in prediction or coding?
 tools/ctx_study.py, tools/pred_study.py, tools/tune.py   the design experiments
-tests/              32 tests: roundtrips, edge cases, coder internals
+docs/research.md    every technique surveyed and what it measured — including the
+                    ones that made things worse
+tests/              34 tests: roundtrips, edge cases, coder internals
 ```
 
 ## Running it
@@ -182,6 +207,6 @@ pip install numpy pillow                 # imagecodecs and pytest for benchmarks
 python -m pytest tests -q
 python tools/fetch_testdata.py           # Kodak photos + Xiph clips (not committed)
 python tools/ladder.py testdata/images/*.png
-python tools/bench_image.py testdata/images/*.png
+python tools/bench_image.py test          # held-out split; "dev" or "all" also work
 python tools/bench_video.py testdata/video/akiyo_cif.y4m 16
 ```

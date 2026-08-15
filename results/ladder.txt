@@ -10,8 +10,8 @@ raw                     7077888    24.000     1.00x             uncompressed RGB
 huffman-global          6680683    22.653     1.06x      -5.6%  one Huffman tree over all bytes
 huffman-perchan         6574377    22.293     1.08x      -1.6%  a Huffman tree per colour channel (the original idea)
 huffman-med             4679107    15.866     1.51x     -28.8%  + MED spatial prediction first
-huffman-rct-med         3338822    11.321     2.12x     -28.6%  + reversible colour transform
-rans-ctx                3166512    10.737     2.24x      -5.2%  + context-modelled static rANS (computed)
-hve                     3065681    10.395     2.31x      -3.2%  + adaptive contexts, cross-channel, sign modelling (measured)
+huffman-rct-med         3319109    11.255     2.13x     -29.1%  + reversible colour transform
+rans-ctx                3150770    10.684     2.25x      -5.1%  + context-modelled static rANS (computed)
+hve                     3005344    10.191     2.36x      -4.6%  + adaptive contexts, cross-channel, sign modelling (measured)
 
 (PNG for scale)         4488577    15.220     1.58x
