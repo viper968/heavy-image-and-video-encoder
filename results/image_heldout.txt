@@ -1,32 +1,46 @@
 split: test (dev=6 images, held-out test=18 images)
 
-done kodim02.png
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
+skip AVIF 'lossless': KeyError
 done kodim03.png
+done kodim02.png
 done kodim04.png
 done kodim06.png
-done kodim07.png
 done kodim09.png
-done kodim10.png
-done kodim11.png
 done kodim12.png
-done kodim14.png
+done kodim07.png
 done kodim15.png
 done kodim16.png
+done kodim10.png
+done kodim11.png
+done kodim14.png
+done kodim20.png
 done kodim17.png
 done kodim18.png
-done kodim20.png
 done kodim21.png
 done kodim22.png
 done kodim24.png
+skip AVIF 'lossless': KeyError
 
 18 images, 7077888 pixels, 21233664 raw bytes
+100.9s wall clock across 12 processes
+baselines: Pillow 12.3.0, imagecodecs 2026.8.16, libjxl 0.12.0, libwebp 1.6.0
 
-codec                     bytes      bpp    ratio     enc s  verified
-AVIF 'lossless'         4915600    5.556    4.32x       4.7  LOSSY (max err 55)
-JPEG XL e9              7346399    8.303    2.89x      56.0  lossless
-JPEG XL e7              7406679    8.372    2.87x      15.7  lossless
-hve                     7854553    8.878    2.70x     527.4  lossless
-WebP lossless           8099860    9.155    2.62x     166.6  lossless
-PNG (optimised)        11321001   12.796    1.88x       5.0  lossless
+codec                     bytes      bpp    ratio     cpu s  verified
+JPEG XL e9              7207847    8.147    2.95x      60.5  lossless
+JPEG XL e7              7305646    8.257    2.91x      14.9  lossless
+hve                     7854553    8.878    2.70x     653.6  lossless
+WebP lossless           8099860    9.155    2.62x     169.6  lossless
+PNG (optimised)        11321001   12.796    1.88x       6.3  lossless
 
-hve is +6.92% vs best verified lossless (JPEG XL e9)
+hve is +8.97% vs best verified lossless (JPEG XL e9)

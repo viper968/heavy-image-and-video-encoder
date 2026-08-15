@@ -23,46 +23,54 @@ held-out split (`tools/corpus.py`); no parameter has ever been fitted to them.
 
 | codec | bytes | bpp | ratio | verified |
 |---|---:|---:|---:|---|
-| AVIF "lossless" (Pillow) | 4,915,600 | 5.56 | 4.32x | **not actually lossless** (max err 55) |
-| JPEG XL, effort 9 | 7,346,399 | 8.30 | 2.89x | lossless |
-| JPEG XL, effort 7 | 7,406,679 | 8.37 | 2.87x | lossless |
+| JPEG XL, effort 9 | 7,207,847 | 8.15 | 2.95x | lossless |
+| JPEG XL, effort 7 | 7,305,646 | 8.26 | 2.91x | lossless |
 | **hve** | **7,854,553** | **8.88** | **2.70x** | lossless |
 | WebP lossless | 8,099,860 | 9.16 | 2.62x | lossless |
 | PNG (optimised) | 11,321,001 | 12.80 | 1.88x | lossless |
 
-30.6% smaller than PNG, 3.0% smaller than lossless WebP, 6.9% larger than
+30.6% smaller than PNG, 3.0% smaller than lossless WebP, 9.0% larger than
 JPEG XL. **JPEG XL is still ahead** — `docs/research.md` records what was tried
 against that gap, what each technique was worth when measured, and what is
 left.
+
+Measured with libjxl 0.12.0, libwebp 1.6.0, Pillow 12.3.0. An earlier run on
+libjxl 0.11 put JPEG XL at 7,346,399 and the gap at 6.9%; hve produced byte-
+identical output on both machines, so the whole 2.1-point move is the reference
+encoder improving, not this one regressing. Baseline versions are printed with
+every benchmark run for exactly this reason. (That earlier machine also had a
+Pillow with AVIF, whose `lossless=True` returned visibly lossy output — max
+error 55 — which is why nothing here is trusted on its label.)
 
 ### Video — 16 frames of `akiyo_cif` (352x288 YUV420, 2,433,024 raw bytes)
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| x264 lossless (veryslow) | 321,064 | 7.58x | lossless |
-| x265 lossless (veryslow) | 323,440 | 7.52x | lossless |
+| x264 lossless (veryslow) | 321,053 | 7.58x | lossless |
+| x265 lossless (veryslow) | 323,443 | 7.52x | lossless |
 | **hve** | **325,399** | **7.48x** | lossless |
-| AV1 lossless (libaom) | 340,300 | 7.15x | lossless |
-| VP9 lossless | 347,551 | 7.00x | lossless |
-| FFV1 level 3 | 745,937 | 3.26x | lossless |
-| Ut Video | 1,117,093 | 2.18x | lossless |
-| FFVHuff | 1,126,268 | 2.16x | lossless |
+| AV1 lossless (libaom) | 329,528 | 7.38x | lossless |
+| VP9 lossless | 348,041 | 6.99x | lossless |
+| FFV1 level 3 | 745,942 | 3.26x | lossless |
+| Ut Video | 1,117,097 | 2.18x | lossless |
+| FFVHuff | 1,126,272 | 2.16x | lossless |
 
-Beats AV1 and VP9 in lossless mode, 2.3x smaller than FFV1, within 2% of x264.
+Beats AV1 and VP9 in lossless mode, 2.3x smaller than FFV1, within 1.4% of
+x264. Measured with ffmpeg 6.1.6.
 
 On high-motion content the ranking changes. Same 16-frame test on `foreman_cif`,
 which pans and has fast head movement:
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| x264 lossless | 846,092 | 2.88x | lossless |
-| x265 lossless | 853,010 | 2.85x | lossless |
-| AV1 lossless | 880,345 | 2.76x | lossless |
+| x264 lossless | 846,081 | 2.88x | lossless |
+| AV1 lossless | 851,838 | 2.86x | lossless |
+| x265 lossless | 852,986 | 2.85x | lossless |
 | **hve** | **883,078** | **2.76x** | lossless |
-| VP9 lossless | 885,846 | 2.75x | lossless |
-| FFV1 level 3 | 971,084 | 2.51x | lossless |
+| VP9 lossless | 886,928 | 2.74x | lossless |
+| FFV1 level 3 | 971,089 | 2.51x | lossless |
 
-hve gives up its lead here — 4.4% behind x264 and level with AV1, against 9%
+hve gives up its lead here — 4.4% behind x264 and 3.7% behind AV1, against 9%
 ahead of FFV1. That is the price of a deliberately simple inter design: one
 reference frame, full-pel vectors only, a single 16x16 block size, no
 bidirectional prediction. Halving the block size to 8x8 was measured and made it
@@ -165,9 +173,11 @@ are coded at their native subsampled size.
 ## Honest limitations
 
 - **It is slow, and got slower.** This is a readable Python reference
-  implementation: ~25s to encode a 768x512 photo, up from 3.2s before the
-  mixing layer went in — context mixing and secondary estimation run per coded
-  bit. Video is about 1.6s per CIF frame. The algorithms are all O(pixels) — the constant is Python. A C port
+  implementation: ~10s to encode and ~9s to decode a 768x512 photo on a
+  12th-gen i5 under Python 3.14, up from 3.2s before the mixing layer went in —
+  context mixing and secondary estimation run per coded bit. Video is about 1.1s
+  per CIF frame. It is also strictly single-threaded; `tools/bench_image.py
+  --jobs=N` parallelises across images, not within one. The algorithms are all O(pixels) — the constant is Python. A C port
   would land in the same class as the codecs it is compared against.
 - **JPEG XL still wins on stills** by 6.9% on held-out images. Context mixing,
   secondary estimation, a self-correcting weighted predictor and an online
@@ -214,6 +224,6 @@ pip install numpy pillow                 # imagecodecs and pytest for benchmarks
 python -m pytest tests -q
 python tools/fetch_testdata.py           # Kodak photos + Xiph clips (not committed)
 python tools/ladder.py testdata/images/*.png
-python tools/bench_image.py test          # held-out split; "dev" or "all" also work
+python tools/bench_image.py --jobs=12 test   # held-out split; "dev"/"all" also work
 python tools/bench_video.py testdata/video/akiyo_cif.y4m 16
 ```

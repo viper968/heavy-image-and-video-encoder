@@ -52,45 +52,117 @@ def hve_codec(arr):
 
 
 def build_codecs():
-    codecs = [
+    """Only codecs this machine can actually run.
+
+    Pillow builds differ in which formats they carry, and imagecodecs may be
+    absent entirely. A benchmark that dies because one baseline is missing is
+    useless on a machine that has the others, so each candidate is probed once
+    on a tiny image and dropped if it cannot run.
+    """
+    candidates = [
         ("hve", hve_codec),
         ("PNG (optimised)", pillow_codec("PNG", optimize=True)),
         ("WebP lossless", pillow_codec("WEBP", lossless=True, quality=100, method=6)),
         ("AVIF 'lossless'", pillow_codec("AVIF", lossless=True, quality=100)),
     ]
     try:
-        codecs.append(("JPEG XL e7", jxl_codec(7)))
-        codecs.append(("JPEG XL e9", jxl_codec(9)))
+        candidates.append(("JPEG XL e7", jxl_codec(7)))
+        candidates.append(("JPEG XL e9", jxl_codec(9)))
     except ImportError:
         pass
+
+    probe = np.zeros((8, 8, 3), dtype=np.uint8)
+    probe[::2] = 200
+    codecs = []
+    for name, run in candidates:
+        try:
+            run(probe)
+        except Exception as exc:                      # missing format, missing lib
+            print("skip %s: %s" % (name, type(exc).__name__), file=sys.stderr)
+            continue
+        codecs.append((name, run))
     return codecs
 
 
-def main(paths):
-    codecs = build_codecs()
-    totals = {name: 0 for name, _ in codecs}
-    times = {name: 0.0 for name, _ in codecs}
-    status = {name: "lossless" for name, _ in codecs}
-    pixels = 0
-    raw = 0
+def _baseline_versions():
+    """Baseline sizes move when their libraries move; record which ones ran."""
+    import PIL
+    parts = ["Pillow %s" % PIL.__version__]
+    try:
+        from imagecodecs import __version__ as ic, jpegxl_version, webp_version
+        parts += ["imagecodecs %s" % ic, jpegxl_version(), webp_version()]
+    except ImportError:
+        parts.append("imagecodecs absent")
+    return ", ".join(parts)
 
-    for path in paths:
-        arr = np.array(Image.open(path).convert("RGB"))
-        pixels += arr.shape[0] * arr.shape[1]
-        raw += arr.size
-        for name, run in codecs:
-            start = time.time()
-            blob, back = run(arr)
-            times[name] += time.time() - start
-            totals[name] += len(blob)
-            if not np.array_equal(arr, back):
-                err = np.abs(arr.astype(int) - back.astype(int))
-                status[name] = "LOSSY (max err %d)" % err.max()
-        print("done %s" % path.split("/")[-1], flush=True)
 
-    print("\n%d images, %d pixels, %d raw bytes\n" % (len(paths), pixels, raw))
+_CODECS = None
+
+
+def _worker_init():
+    global _CODECS
+    _CODECS = build_codecs()
+
+
+def _measure(path):
+    """Run every codec on one image. Sizes are deterministic, so splitting the
+    corpus across processes changes only how long the run takes.
+
+    Timing uses process CPU time, not wall clock: with more workers than
+    physical cores, wall time per task inflates from contention and would make
+    a parallel run look slower than a serial one for the same work.
+    """
+    arr = np.array(Image.open(path).convert("RGB"))
+    sizes, times, status = {}, {}, {}
+    for name, run in _CODECS:
+        start = time.process_time()
+        blob, back = run(arr)
+        times[name] = time.process_time() - start
+        sizes[name] = len(blob)
+        if np.array_equal(arr, back):
+            status[name] = "lossless"
+        else:
+            err = np.abs(arr.astype(int) - back.astype(int))
+            status[name] = "LOSSY (max err %d)" % err.max()
+    return path, arr.shape[0] * arr.shape[1], arr.size, sizes, times, status
+
+
+def main(paths, jobs=1):
+    wall = time.time()
+    if jobs > 1:
+        import multiprocessing as mp
+        with mp.Pool(jobs, initializer=_worker_init) as pool:
+            results = []
+            for res in pool.imap_unordered(_measure, paths):
+                results.append(res)
+                print("done %s" % res[0].split("/")[-1], flush=True)
+    else:
+        _worker_init()
+        results = []
+        for path in paths:
+            results.append(_measure(path))
+            print("done %s" % path.split("/")[-1], flush=True)
+    wall = time.time() - wall
+
+    names = [name for name, _ in build_codecs()]
+    totals = {n: 0 for n in names}
+    times = {n: 0.0 for n in names}
+    status = {n: "lossless" for n in names}
+    pixels = raw = 0
+    for _, px, rawbytes, sizes, ts, st in results:
+        pixels += px
+        raw += rawbytes
+        for n in names:
+            totals[n] += sizes[n]
+            times[n] += ts[n]
+            if st[n] != "lossless":
+                status[n] = st[n]
+
+    print("\n%d images, %d pixels, %d raw bytes" % (len(paths), pixels, raw))
+    print("%.1fs wall clock across %d process%s" % (wall, jobs, "" if jobs == 1 else "es"))
+    print("baselines: %s\n" % _baseline_versions())
     print("%-18s %12s %8s %8s %9s  %s"
-          % ("codec", "bytes", "bpp", "ratio", "enc s", "verified"))
+          % ("codec", "bytes", "bpp", "ratio", "cpu s", "verified"))
     rows = sorted(totals.items(), key=lambda kv: kv[1])
     for name, size in rows:
         print("%-18s %12d %8.3f %7.2fx %9.1f  %s"
@@ -106,12 +178,23 @@ def main(paths):
 
 if __name__ == "__main__":
     argv = sys.argv[1:]
+    jobs = 1
+    for i, a in enumerate(argv):
+        if a.startswith("--jobs"):
+            jobs = int(a.split("=", 1)[1]) if "=" in a else int(argv[i + 1])
+            argv = [v for j, v in enumerate(argv)
+                    if j != i and not (("=" not in a) and j == i + 1)]
+            break
+    if jobs <= 0:
+        import os
+        jobs = os.cpu_count() or 1
+
     if not argv or argv[0] in ("dev", "test", "all"):
         import corpus
         which = argv[0] if argv else "test"
         paths = {"dev": corpus.dev, "test": corpus.test,
                  "all": lambda: corpus.dev() + corpus.test()}[which]()
         print("split: %s (%s)\n" % (which, corpus.describe()))
-        main(paths)
+        main(paths, jobs)
     else:
-        main(argv)
+        main(argv, jobs)

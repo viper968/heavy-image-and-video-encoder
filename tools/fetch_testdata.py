@@ -8,7 +8,9 @@ import os
 import sys
 import urllib.request
 
-KODAK = ["01", "05", "08", "13", "19", "23"]
+# The whole Kodak set: tools/corpus.py splits it into six dev images and
+# eighteen held-out ones, and the headline numbers come from the held-out half.
+KODAK = ["%02d" % i for i in range(1, 25)]
 KODAK_URL = "https://r0k.us/graphics/kodak/kodak/kodim%s.png"
 CLIPS = {
     "akiyo_cif.y4m": "https://media.xiph.org/video/derf/y4m/akiyo_cif.y4m",
