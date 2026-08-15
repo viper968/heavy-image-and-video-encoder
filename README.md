@@ -26,11 +26,11 @@ held-out split (`tools/corpus.py`); no parameter has ever been fitted to them.
 | AVIF "lossless" (Pillow) | 4,915,600 | 5.56 | 4.32x | **not actually lossless** (max err 55) |
 | JPEG XL, effort 9 | 7,346,399 | 8.30 | 2.89x | lossless |
 | JPEG XL, effort 7 | 7,406,679 | 8.37 | 2.87x | lossless |
-| **hve** | **7,875,009** | **8.90** | **2.70x** | lossless |
+| **hve** | **7,854,553** | **8.88** | **2.70x** | lossless |
 | WebP lossless | 8,099,860 | 9.16 | 2.62x | lossless |
 | PNG (optimised) | 11,321,001 | 12.80 | 1.88x | lossless |
 
-30.4% smaller than PNG, 2.8% smaller than lossless WebP, 7.2% larger than
+30.6% smaller than PNG, 3.0% smaller than lossless WebP, 6.9% larger than
 JPEG XL. **JPEG XL is still ahead** — `docs/research.md` records what was tried
 against that gap, what each technique was worth when measured, and what is
 left.
@@ -169,7 +169,7 @@ are coded at their native subsampled size.
   mixing layer went in — context mixing and secondary estimation run per coded
   bit. Video is about 1.6s per CIF frame. The algorithms are all O(pixels) — the constant is Python. A C port
   would land in the same class as the codecs it is compared against.
-- **JPEG XL still wins on stills** by 7.2% on held-out images. Context mixing,
+- **JPEG XL still wins on stills** by 6.9% on held-out images. Context mixing,
   secondary estimation, a self-correcting weighted predictor and an online
   learned context tree were all built and measured against that gap; the first
   three are in, the fourth was not worth its cost. See `docs/research.md` for

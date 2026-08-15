@@ -26,7 +26,7 @@ Weighing of Context Models*, the ZPAQ specification, and the FLIF/MANIAC ICIP
 | Splitting the error context into west/north | — | **+0.5% worse** | rejected |
 | Cross-channel context on the magnitude bins | — | **+0.2% worse** | rejected |
 | Online learned context tree (MANIAC-style) | the big one, see below | **-0.1%** | rejected |
-| Match model as a mixer expert | the one I'd bet on | **-0.2%** on photos, **8.7x** on repetition | kept |
+| Match model, hard switch on sustained agreement | the one I'd bet on | **-0.26%** held-out, **8.7x** on repetition | kept |
 | Match value averaged into the predictor blend | — | **+1.3% worse** | rejected |
 
 ### The three that failed are the informative ones
@@ -100,6 +100,11 @@ N trades one against the other, swept on the dev split:
 The lesson generalises: a bimodal predictor needs a switch, not an average, and
 the reason the first two attempts underperformed was the combiner rather than
 the model.
+
+On the held-out 18 the finished model is worth **0.26%**, more than the 0.009%
+the single tuning image suggested — Kodak does contain repetitive structure
+(brickwork, market awnings, fabric), just not in the image the threshold was
+swept on. The gap to JPEG XL closes from 7.20% to 6.92%.
 
 ## The learned context tree: built, measured, rejected
 
