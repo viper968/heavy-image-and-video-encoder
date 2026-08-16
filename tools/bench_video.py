@@ -102,6 +102,15 @@ def main(path, nframes=16):
     else:
         print("ffmpeg not found - baselines skipped")
 
+    import subprocess as _sp
+    ver = "ffmpeg absent"
+    if FFMPEG:
+        try:
+            ver = _sp.run([FFMPEG, "-version"], capture_output=True).stdout.decode(
+                "utf-8", "replace").splitlines()[0]
+        except Exception:
+            pass
+    print("\nbaselines: %s" % ver)
     print("\n%-18s %12s %10s %9s %9s  %s"
           % ("codec", "bytes", "ratio", "enc s", "dec s", "verified"))
     for name, size, enc, dec, ok in sorted(results, key=lambda r: r[1]):

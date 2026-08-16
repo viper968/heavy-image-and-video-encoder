@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from . import model, rc
+from . import fast, model, rc
 from .bitio import Reader, Writer
 from .transform import predict_plane, rct_forward, rct_inverse, zigzag
 
@@ -61,6 +61,42 @@ def _image_from_planes(planes, channels, flags):
     return np.stack(planes, axis=-1)
 
 
+def _encode_payload(planes, width, height):
+    """Range-coder payload for the planes, jitted when numba is present.
+
+    Both paths emit the same bytes — `tests/test_codecs.py` pins that exactly —
+    so which one runs is purely a speed question and never a format question.
+    """
+    if fast.available():
+        return fast.encode_planes(planes)
+    coder = rc.Encoder()
+    bank = model.new_model()
+    luma_err = None
+    for i, plane in enumerate(planes):
+        _, err = model.code_plane(coder, True, width, height, PLANE_KINDS[i], bank,
+                                  src=plane.tolist(),
+                                  luma_err=luma_err if i in (1, 2) else None)
+        if i == 0:
+            luma_err = err
+    return coder.finish()
+
+
+def _decode_payload(payload, channels, width, height):
+    if fast.available():
+        return list(fast.decode_planes(payload, channels, height, width))
+    coder = rc.Decoder(payload)
+    bank = model.new_model()
+    planes = []
+    luma_err = None
+    for i in range(channels):
+        rows, err = model.code_plane(coder, False, width, height, PLANE_KINDS[i], bank,
+                                     luma_err=luma_err if i in (1, 2) else None)
+        planes.append(np.array(rows, dtype=np.uint8))
+        if i == 0:
+            luma_err = err
+    return planes
+
+
 def encode(img):
     """Compress an image array (HxW, HxWx3 or HxWx4, uint8) to .hvi bytes."""
     img = np.ascontiguousarray(img, dtype=np.uint8)
@@ -75,16 +111,7 @@ def encode(img):
     w.u8(channels)
     w.u8(flags)
 
-    coder = rc.Encoder()
-    bank = model.new_model()
-    luma_err = None
-    for i, plane in enumerate(planes):
-        rows = plane.tolist()
-        _, err = model.code_plane(coder, True, width, height, PLANE_KINDS[i], bank,
-                                  src=rows, luma_err=luma_err if i in (1, 2) else None)
-        if i == 0:
-            luma_err = err
-    payload = coder.finish()
+    payload = _encode_payload(np.ascontiguousarray(planes), width, height)
     w.varint(len(payload))
     w.raw(payload)
     return w.bytes()
@@ -102,14 +129,5 @@ def decode(data):
     payload_len = r.varint()
     payload = r.raw(payload_len)
 
-    coder = rc.Decoder(payload)
-    bank = model.new_model()
-    planes = []
-    luma_err = None
-    for i in range(channels):
-        rows, err = model.code_plane(coder, False, width, height, PLANE_KINDS[i], bank,
-                                     luma_err=luma_err if i in (1, 2) else None)
-        planes.append(np.array(rows, dtype=np.uint8))
-        if i == 0:
-            luma_err = err
+    planes = _decode_payload(payload, channels, width, height)
     return _image_from_planes(planes, channels, flags)

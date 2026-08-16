@@ -28,6 +28,20 @@ Weighing of Context Models*, the ZPAQ specification, and the FLIF/MANIAC ICIP
 | Online learned context tree (MANIAC-style) | the big one, see below | **-0.1%** | rejected |
 | Match model, hard switch on sustained agreement | the one I'd bet on | **-0.26%** held-out, **8.7x** on repetition | kept |
 | Match value averaged into the predictor blend | — | **+1.3% worse** | rejected |
+| Match's expected sign as a sign-bit context | — | **-0.26%** | kept |
+| Match's expected magnitude as a *split* of the length-bin context | — | **+0.05% worse** | rejected |
+| Match's expected magnitude as a *mixed expert* on the length bins | — | **-0.16%** | kept |
+| Second APM stage keyed on match state (LPAQ chains two) | 0.6-2% | **-0.09%** | kept |
+| Two trend sub-predictors (2W-WW, 2N-NN) in the blend | paq8px calls these strong | **+0.20% worse** | rejected |
+| **Learned (NLMS) combiner replacing the error-weighted average** | the one item left | **-1.10%** held-out, -1.95% dev | kept |
+| — combiner over 7 mostly-redundant linear inputs | 0.5-1% | **-0.013%** | superseded, see below |
+| — combiner over the second ring + GAP (13 inputs) | — | **-1.18%** dev | kept |
+| Match value as a combiner input | the thesis test | **+0.15% worse** | rejected |
+| Match value with one weight per match state | — | **+0.13% worse** | rejected |
+| Combiner confidence as a 5th zero-flag expert | — | **-0.13%** | kept |
+| Combiner confidence as a 3rd length-bin expert | — | **-0.18%** | kept |
+| Combiner weight sets on 16 activity buckets vs 8 | finer is better | **+0.06% worse** | 8 kept |
+| Combiner weight sets split 4 ways on gradient direction | — | **-0.37%** | kept |
 
 ### The three that failed are the informative ones
 
@@ -56,6 +70,63 @@ predictor's max neighbour error — the property libjxl's tree builder ranks
 highest — returned 13 bytes on a 464KB image. That context is nearly a
 restatement of the neighbour-error context expert 1 already uses. Mixing only
 pays when the experts genuinely disagree.
+
+## The learned combiner: the rebuild, and what it did and did not fix
+
+This was the one item the rest of this document pointed at, and it is now built.
+The error-weighted average is replaced by an NLMS combiner whose weights are
+learned online by gradient descent on the real prediction error. Held out, it is
+worth **1.10%**, which closes the JPEG XL gap from 8.17% to **6.99%** and is
+roughly three times the size of any other single change in this file.
+
+Three things about it are worth more than the headline number.
+
+**The first attempt returned nothing, and the reason was not the combiner.**
+Seven inputs — the four existing sub-predictors plus NE, NW and the planar
+`W+N-NW` — gave **-0.013%**, indistinguishable from zero across a full sweep of
+step sizes. The combiner is *linear*, and every one of those inputs was already
+a linear combination of the same four neighbours. `2W-WW` is worthless beside W
+and WW; `W+NE-N` and `W+N-NW` add no span at all. A linear combiner cannot gain
+from inputs that are already inside its span, however good each one is on its
+own. Replacing them with an actual basis — the second ring (WW, WWW, NN, NNW,
+NNE, NWW, NEE) plus two genuinely *nonlinear* predictors (MED and CALIC's GAP) —
+took the same machinery from -0.013% to **-1.18%**. The lesson is that "add more
+predictors to a mixer" is only half an instruction; what matters is whether they
+are reachable from the ones already there.
+
+**Averaging was not the match model's whole problem.** The thesis this rebuild
+was built on says an average is dragged by a volatile member while a learned
+combiner ignores it, and the match model was the evidence. So the match value
+went into the combiner as a test. It measured **0.15% worse**, and with a
+separate learned weight per match-length state — which lets the combiner hold a
+near-zero weight for an unproven match and a near-unity one for a proven match —
+still **0.13% worse**. Both were rejected. A bimodal predictor wants a *switch*,
+and the hard override on sustained agreement remains the right combiner for it;
+the learned weights improve on the average for predictors that are continuously
+somewhat-right, which is a different population. The original finding needed
+narrowing, not confirming.
+
+**The confidence it produces is worth almost as much as the prediction.** The
+combiner computes two quantities for free: how much its inputs disagreed (the
+input energy) and how far it had to move the blend (the correction). Neither is
+visible anywhere else in the model, and both bear directly on whether the
+residual will be zero. As a fifth expert on the zero flag that is **-0.13%**,
+and as a third expert on the length bins another **-0.18%** — together about a
+quarter of what the prediction change itself bought. This is also the half of
+the rebuild where *logistic* mixing genuinely applies: a logistic mixer combines
+probabilities, so it belongs on the binary decisions, while the pixel-value
+combiner has to be a linear one. Conflating the two is the easiest way to
+mis-scope this work.
+
+Weight-set context followed the usual dilution curve: one set per plane was
+-1.13%, eight activity buckets -1.58%, sixteen **worse** again at -1.53%. The
+budget was better spent on a different axis — a four-way split on whether the
+neighbourhood is smoother vertically or horizontally, which is the property that
+decides which predictors deserve weight — and that was worth a further 0.37%.
+
+Dev improved 1.95% against 1.10% held out. The constants (step size, energy
+floor, bucket counts) were swept on dev, so some of that spread is fitting; the
+held-out number is the one to quote.
 
 ## The match model: the one that needed a different combiner
 
@@ -159,24 +230,108 @@ tree* rather than a fixed grid:
   beats the actual context by a threshold, the leaf splits on that property.
   The tree is transmitted.
 
-That was built here and did not pay (above). What is left, in the order I would
-try it:
+That was built here and did not pay (above). Of the list that followed it,
+three have since been done and one has been costed out:
 
-1. **Condition the sign and magnitude bins on the match too.** The match model
-   now replaces the prediction when it is confident, but when it is only
-   *fairly* confident its answer still implies an expected residual, and the
-   sign and magnitude bins currently ignore that entirely. This is the same
-   mistake the expert-only version made, one level down.
-2. **A longer-range model** reaching several rows up, and more predictors
-   generally — paq8px carries ~130 for this reason.
-3. **Mixing on the magnitude bins**, not just secondary estimation. The bins
-   currently have one context model each; they are the second largest cost in
-   the file.
-4. **A second mixing layer**, which every serious context-mixing compressor
-   has and which no source I found isolates a number for.
-5. **The hybrid-uint token design** — give small residuals their own jointly
-   modelled symbol instead of decomposing every one into is-zero / sign /
-   unary. Structurally strictly stronger than the current binarisation.
+- ~~Condition the sign and magnitude bins on the match~~ — **done**, -0.42%
+  combined, and the two halves of it are the clearest illustration in this
+  document of mixing beating splitting.
+- ~~Mixing on the magnitude bins~~ — **done** as part of the above.
+- ~~A second secondary-estimation stage~~ — **done**, -0.09%.
+- ~~Hybrid-uint tokens~~ — **not worth building**: the bit budget below shows
+  raw bypass bits are 3.3% of the file (4.6% after the learned combiner),
+  which is the entire ceiling for any binarisation change, and a redesign would
+  capture only part of it.
+
+- ~~A proper mixing network over many more predictors~~ — **done**, and it was
+  the largest single change in the project: -1.10% held out, closing the gap
+  from 8.17% to 6.99%. See "The learned combiner" above for what it fixed, what
+  it did not, and the two ways it was initially mis-built.
+
+That leaves no single large item identified. What the combiner did *not* do is
+also informative: it did not rescue the match value (a switch beats a weight for
+a bimodal predictor), and it did not help foreman, whose gap is motion
+modelling rather than spatial prediction.
+
+The plausible next steps, none of them costed yet:
+
+- **More nonlinear inputs to the combiner.** The linear span is now well
+  covered, and the two nonlinear members (MED, GAP) are carrying the change.
+  That is a testable prediction: further gains should come from predictors that
+  are *not* weighted sums of neighbours — a second GAP variant at a different
+  threshold, a median of three predictors, a texture-matched value. Adding more
+  linear neighbours should now do close to nothing, and if it does not, the span
+  argument above is wrong and worth revisiting.
+- **Two combiners at different adaptation rates.** paq8px runs six LMS filters,
+  not one. The step-size sweep here has a single flat optimum between mu=1/32
+  and 1/64, which is what you would expect if one rate is being asked to serve
+  both smooth and busy regions. Two rates would need a combiner of their own,
+  and on the evidence in this document that should be a mixer or a switch, not
+  an average.
+- **Sub-pixel motion and variable block sizes** for video, where the remaining
+  loss on high-motion content actually lives.
+
+## Where the bits actually go
+
+Measured on three dev images with counters in the encoder (`Bank.stats`), since
+guessing which stage to attack next was clearly not working:
+
+| | |
+|---|---:|
+| average cost | 3.164 bits per plane sample |
+| residuals that are **not** zero | **74.0%** |
+| raw unmodelled bypass mantissa bits | **3.3% of all bits** |
+| mean bit-length of `abs(d)-1` over nonzero residuals | 1.24 |
+
+Two things follow, and both are discouraging for the obvious next steps.
+
+**The hybrid-uint token idea has a hard ceiling of 3.3%**, and would capture
+only a fraction of that. Every bit outside those raw mantissa bits is already
+context-modelled, so a better binarisation can only recover what the bypass
+path throws away.
+
+**74% of residuals are nonzero.** The "is it zero?" flag is therefore not the
+cheap, heavily-skewed decision the design assumes — it costs about 0.83 bits per
+sample, roughly a quarter of the whole file, and the sign bit costs most of
+another quarter. For an unbiased predictor the sign is genuinely incompressible,
+so that quarter is not recoverable by better modelling; it is only recoverable
+by making the residuals *smaller*.
+
+Which put the remaining gap in prediction and in the size of the model, not in
+the entropy coder or the binarisation — and that is what the learned combiner
+then acted on, for 1.10% held out, against the 0.1-0.4% every cheap contextual
+trick before it had returned. The diagnosis in this section is the reason that
+work was scoped as a combiner rebuild rather than as another context, so the
+measurement was worth the trouble of taking.
+
+### Re-measured after the learned combiner
+
+Same three dev images, both columns produced by the same script so they are
+comparable to each other. (The absolute figures in the table above do not
+reproduce under this script — the original run's setup was not recorded well
+enough to reconstruct — so trust the direction here, not the difference against
+the older numbers.)
+
+| | before | after |
+|---|---:|---:|
+| bits per plane sample | 3.492 | **3.415** |
+| residuals that are **not** zero | 76.3% | **77.2%** |
+| raw unmodelled bypass bits | 5.35% | **4.57%** |
+| mean bit-length of `abs(d)-1` over nonzero residuals | 1.55 | **1.41** |
+
+**The combiner produced *more* nonzero residuals, not fewer, and still won.**
+That is the opposite of the obvious expectation — better prediction ought to
+mean more exact hits — and it says something specific about what changed. The
+combiner is not finding more pixels it can nail exactly; it is making the misses
+much cheaper, dropping the mean magnitude bit-length from 1.55 to 1.41 and the
+raw bypass share from 5.35% to 4.57%. A least-squares fit minimises squared
+error, which is not the same objective as maximising exact hits, and here it
+trades a few of the latter for a lot of the former. Anyone tempted to tune this
+model against a zero-residual *count* should read that row first.
+
+It also means the ceiling on a binarisation change moved the other way, from
+3.3% to 4.6% of the file. Still not enough to justify the rebuild, but no longer
+quite as dismissable as it was.
 
 ## Ruled out on cost
 

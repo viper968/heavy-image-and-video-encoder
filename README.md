@@ -7,6 +7,18 @@ The output is not viewable in any normal viewer. That is the point: you send the
 compressed blob plus this decoder, and the other end gets the **exact original
 bytes** back — every pixel identical, verified on every benchmark run below.
 
+Just want to try it on your own files? `playground/README.md` — two commands
+from a fresh clone, and it handles ordinary jpg/mp4 input rather than only the
+PNG and .y4m the core CLI takes:
+
+```
+./playground/setup.sh
+./playground/hve demo
+./playground/hve check my_photo.jpg      # round trip, verifies every pixel
+```
+
+Picking this up to work on it? Read `docs/HANDOFF.md` first.
+
 ```
 python -m hve encode photo.png photo.hvi
 python -m hve decode photo.hvi restored.png     # byte-identical pixels
@@ -21,53 +33,79 @@ Every constant in this codec was chosen by measuring compressed size, so the six
 images used for tuning cannot also carry the headline number. These 18 are the
 held-out split (`tools/corpus.py`); no parameter has ever been fitted to them.
 
-| codec | bytes | bpp | ratio | verified |
-|---|---:|---:|---:|---|
-| AVIF "lossless" (Pillow) | 4,915,600 | 5.56 | 4.32x | **not actually lossless** (max err 55) |
-| JPEG XL, effort 9 | 7,346,399 | 8.30 | 2.89x | lossless |
-| JPEG XL, effort 7 | 7,406,679 | 8.37 | 2.87x | lossless |
-| **hve** | **7,854,553** | **8.88** | **2.70x** | lossless |
-| WebP lossless | 8,099,860 | 9.16 | 2.62x | lossless |
-| PNG (optimised) | 11,321,001 | 12.80 | 1.88x | lossless |
+| codec | bytes | bpp | ratio | cpu s | verified |
+|---|---:|---:|---:|---:|---|
+| JPEG XL, effort 9 | 7,207,847 | 8.15 | 2.95x | 63.9 | lossless |
+| JPEG XL, effort 7 | 7,305,646 | 8.26 | 2.91x | 16.3 | lossless |
+| **hve** | **7,711,460** | **8.72** | **2.75x** | **23.6** | lossless |
+| WebP lossless | 8,099,860 | 9.16 | 2.62x | 175.9 | lossless |
+| PNG (optimised) | 11,321,001 | 12.80 | 1.88x | 6.0 | lossless |
 
-30.6% smaller than PNG, 3.0% smaller than lossless WebP, 6.9% larger than
+`cpu s` is encode **and** decode for all 18 images, measured the same way for
+every codec.
+
+31.9% smaller than PNG, 4.8% smaller than lossless WebP, 7.0% larger than
 JPEG XL. **JPEG XL is still ahead** — `docs/research.md` records what was tried
 against that gap, what each technique was worth when measured, and what is
 left.
+
+The last change was the largest single one: replacing the error-weighted
+averaging blend with a *learned* combiner over a wider predictor set closed the
+gap from 8.2% to 7.0%. It cost about 24% more time (19.0s to 23.6s), which is
+the trade this codec exists to make, and it is still faster than both JPEG XL
+effort 9 and lossless WebP. Treat the `cpu s` column as approximate: a repeat
+run of this same benchmark moved JPEG XL e9 from 63.9s to 77.9s on identical
+code, so cross-run timing differences under about 20% are machine load, not
+signal. The byte counts are exact and reproducible.
+
+Measured with libjxl 0.12.0, libwebp 1.6.0, Pillow 12.3.0. An earlier run on
+libjxl 0.11 put JPEG XL at 7,346,399 and the gap at 6.9%; hve produced byte-
+identical output on both machines, so the whole 2.1-point move is the reference
+encoder improving, not this one regressing. Baseline versions are printed with
+every benchmark run for exactly this reason. (That earlier machine also had a
+Pillow with AVIF, whose `lossless=True` returned visibly lossy output — max
+error 55 — which is why nothing here is trusted on its label.)
 
 ### Video — 16 frames of `akiyo_cif` (352x288 YUV420, 2,433,024 raw bytes)
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| x264 lossless (veryslow) | 321,064 | 7.58x | lossless |
-| x265 lossless (veryslow) | 323,440 | 7.52x | lossless |
-| **hve** | **325,399** | **7.48x** | lossless |
-| AV1 lossless (libaom) | 340,300 | 7.15x | lossless |
-| VP9 lossless | 347,551 | 7.00x | lossless |
-| FFV1 level 3 | 745,937 | 3.26x | lossless |
-| Ut Video | 1,117,093 | 2.18x | lossless |
-| FFVHuff | 1,126,268 | 2.16x | lossless |
+| **hve** | **317,769** | **7.66x** | lossless |
+| x264 lossless (veryslow) | 321,053 | 7.58x | lossless |
+| x265 lossless (veryslow) | 323,443 | 7.52x | lossless |
+| AV1 lossless (libaom) | 329,528 | 7.38x | lossless |
+| VP9 lossless | 348,041 | 6.99x | lossless |
+| FFV1 level 3 | 745,942 | 3.26x | lossless |
+| Ut Video | 1,117,097 | 2.18x | lossless |
+| FFVHuff | 1,126,272 | 2.16x | lossless |
 
-Beats AV1 and VP9 in lossless mode, 2.3x smaller than FFV1, within 2% of x264.
+Now first on this clip, ahead of x264, x265, AV1 and VP9 in lossless mode and
+2.3x smaller than FFV1. The learned combiner moved it from 325,399 (third,
+1.4% behind x264) to 317,769, a 2.3% gain on a change made and tuned entirely
+against still images. Measured with ffmpeg 6.1.6.
 
 On high-motion content the ranking changes. Same 16-frame test on `foreman_cif`,
 which pans and has fast head movement:
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| x264 lossless | 846,092 | 2.88x | lossless |
-| x265 lossless | 853,010 | 2.85x | lossless |
-| AV1 lossless | 880,345 | 2.76x | lossless |
-| **hve** | **883,078** | **2.76x** | lossless |
-| VP9 lossless | 885,846 | 2.75x | lossless |
-| FFV1 level 3 | 971,084 | 2.51x | lossless |
+| x264 lossless | 846,081 | 2.88x | lossless |
+| AV1 lossless | 851,838 | 2.86x | lossless |
+| x265 lossless | 852,986 | 2.85x | lossless |
+| **hve** | **864,027** | **2.82x** | lossless |
+| VP9 lossless | 886,928 | 2.74x | lossless |
+| FFV1 level 3 | 971,089 | 2.51x | lossless |
 
-hve gives up its lead here — 4.4% behind x264 and level with AV1, against 9%
-ahead of FFV1. That is the price of a deliberately simple inter design: one
-reference frame, full-pel vectors only, a single 16x16 block size, no
-bidirectional prediction. Halving the block size to 8x8 was measured and made it
-slightly *worse* (more mode and vector overhead than it saves), so the missing
-ingredient is sub-pixel motion and variable block sizes, not finer blocks.
+hve gives up its lead here — 2.1% behind x264 and 1.4% behind AV1, against 12%
+ahead of FFV1. The learned combiner narrowed this too, from 883,078, where the
+deficits were 4.4% and 3.7%; but it did not close it, and that is the expected
+shape of the result. What is missing on this clip is motion modelling, which a
+better spatial combiner does not touch. That is the price of a deliberately
+simple inter design: one reference frame, full-pel vectors only, a single 16x16
+block size, no bidirectional prediction. Halving the block size to 8x8 was
+measured and made it slightly *worse* (more mode and vector overhead than it
+saves), so the missing ingredient is sub-pixel motion and variable block sizes,
+not finer blocks.
 
 Reproduce with `python tools/bench_image.py test` and
 `python tools/bench_video.py testdata/video/akiyo_cif.y4m 16`. Every baseline is
@@ -89,7 +127,7 @@ sounds, and `tools/ladder.py` measures why. On the same 6 photos:
 | huffman-med | 4,679,107 | 15.866 | -28.8% | + MED spatial prediction first |
 | huffman-rct-med | 3,319,109 | 11.255 | -29.1% | + reversible colour transform |
 | rans-ctx | 3,150,770 | 10.684 | -5.1% | + context-modelled static rANS |
-| **hve** | **3,005,344** | **10.191** | -4.6% | + weighted prediction, adaptive contexts, mixing |
+| **hve** | **2,925,843** | **9.921** | -7.1% | + weighted prediction, learned combiner, adaptive contexts, mixing |
 
 Per-channel Huffman on raw pixel values buys **7.1% total**, and splitting the
 tree per channel accounts for only 1.6 points of that. The reason is that the
@@ -129,25 +167,45 @@ and several of them can be *mixed* per bit rather than one being chosen.
    west) are blended, each weighted by how wrong it has recently been *right
    here*. Where one is reliably right — a vertical edge, a smooth gradient — it
    takes over locally with nothing signalled.
-3. **Context modelling** (`hve/model.py`) — the residual is coded as
+3. **A learned combiner on top of that blend** (`hve/model.py`) — thirteen
+   predictors, including the whole second ring of neighbours and CALIC's
+   nonlinear GAP, are combined by weights learned online with normalised least
+   mean squares. The blend from step 2 is the *origin* of that combination, so
+   a zero weight vector reproduces it exactly and the layer can only earn its
+   way in. This matters because the weights are learned jointly against the
+   real error and are free to go negative, where an error-weighted average
+   weights each member in isolation, forces the weights positive, and so is
+   dragged by a volatile member however much it is down-weighted. Four earlier
+   attempts to add predictors to the average all failed for that reason; under
+   the learned combiner the same class of predictor pays 1.1%.
+4. **Context modelling** (`hve/model.py`) — the residual is coded as
    *is-it-zero* / *sign* / *bit-length* / *mantissa*, with contexts drawn from
    local gradient activity, how badly neighbouring pixels were predicted, and —
    for chroma — how badly the co-located luma pixel was predicted. Chroma tends
    to go wrong exactly where luma did.
-4. **Match model** (`hve/model.py`) — hashes the causal neighbourhood and
+5. **Match model** (`hve/model.py`) — hashes the causal neighbourhood and
    remembers where that exact neighbourhood last occurred anywhere earlier in
    the plane. Once its answer has held for eight consecutive pixels it replaces
    the prediction outright. Gradient predictors cannot see repetition; this
    makes spatially incompressible but repetitive content — tiled textures,
    lettering, screenshots — collapse by an order of magnitude.
-5. **Context mixing** (`hve/mix.py`) — the zero flag, which every pixel pays,
-   is predicted by four experts that view the neighbourhood differently
-   (including the match model) and combined by an LPAQ-style logistic mixer
+6. **Context mixing** (`hve/mix.py`) — the zero flag, which every pixel pays,
+   is predicted by five experts that view the neighbourhood differently
+   (including the match model, and the learned combiner's own confidence)
+   and combined by an LPAQ-style logistic mixer
    whose weights are learned online and selected by context. A secondary
    estimation stage (APM/SSE) then corrects the result's calibration, on the
    zero flag and the magnitude bins alike.
-6. **Adaptive binary range coder** (`hve/rc.py`) — LZMA-style, 15-bit
+7. **Adaptive binary range coder** (`hve/rc.py`) — LZMA-style, 15-bit
    probabilities, no transmitted tables.
+
+`hve/model.py` is the readable reference implementation and the definition of
+the format. `hve/fast.py` is the same loop compiled by numba — covering both
+stills and video, including video's per-block prediction branch — used
+automatically when numba is installed. Keeping two implementations of a codec's
+core loop is exactly how formats get silently corrupted, so a test requires
+them to emit **byte-identical** bitstreams — drift fails loudly instead of
+quietly writing files only one path can read.
 
 **Video** (`hve/video.py`)
 
@@ -164,19 +222,26 @@ are coded at their native subsampled size.
 
 ## Honest limitations
 
-- **It is slow, and got slower.** This is a readable Python reference
-  implementation: ~25s to encode a 768x512 photo, up from 3.2s before the
-  mixing layer went in — context mixing and secondary estimation run per coded
-  bit. Video is about 1.6s per CIF frame. The algorithms are all O(pixels) — the constant is Python. A C port
+- **Speed** (12th-gen i5, Python 3.14, numba compiling the per-pixel path):
+  a 768x512 photo encodes in 0.29s and decodes in 0.16s, 33x and 56x faster
+  than the pure-Python loop this started as. 16 CIF video frames encode in 3.1s
+  and decode in 0.3s — 6x and 48x. Video *encode* is now dominated by motion
+  search rather than by coding, so it gained least; decode, which has no search
+  to do, gained most. Everything is single-threaded; `tools/bench_image.py
+  --jobs=N` parallelises across images, not within one. Without numba the codec
+  still works, just at the original speed. The algorithms are all O(pixels) — the constant is Python. A C port
   would land in the same class as the codecs it is compared against.
-- **JPEG XL still wins on stills** by 6.9% on held-out images. Context mixing,
-  secondary estimation, a self-correcting weighted predictor and an online
-  learned context tree were all built and measured against that gap; the first
-  three are in, the fourth was not worth its cost. See `docs/research.md` for
-  every number, including the techniques that made things *worse*.
+- **JPEG XL still wins on stills** by 7.0% on held-out images. Nineteen
+  techniques have been built and measured against that gap; eight are in and
+  eleven were rejected, several of them ideas the literature rates highly.
+  Instrumenting the encoder showed the remaining gap was in prediction rather
+  than in the entropy coder or the binarisation — raw unmodelled bits are only
+  4.6% of the file — and the learned combiner is what acted on that finding.
+  `docs/research.md` has every number and every reason.
 - **Video uses only the previous frame**, full-pel motion, one block size, and
-  no bidirectional prediction. x264's lossless mode remains slightly ahead, and
-  on high-motion content the margin is wider (see `results/video_foreman.txt`).
+  no bidirectional prediction. That is enough to lead on low-motion content
+  (akiyo), but on high-motion content x264, AV1 and x265 are all still ahead
+  (see `results/video_foreman.txt`).
 - **Already-compressed input is not the target.** Feeding a JPEG in means
   decoding it to pixels and re-compressing those pixels losslessly, which will
   usually be *larger* than the JPEG. Shrinking an existing JPEG/AVIF/H.265 file
@@ -188,8 +253,11 @@ are coded at their native subsampled size.
 ```
 hve/rc.py           adaptive binary range coder (the entropy engine)
 hve/mix.py          logistic mixing + secondary estimation (stretch/squash, Mixer, APM)
-hve/model.py        weighted predictor, match model, context model, residual
-                    binarisation — one loop, shared by image and video paths
+hve/model.py        weighted predictor, learned combiner, match model, context
+                    model, residual binarisation — the readable reference,
+                    shared by image+video
+hve/fast.py         the same loop compiled with numba, for stills and video
+                    alike, pinned byte-identical to model.py by tests
 hve/image.py        .hvi still-image container
 hve/video.py        .hvv video container, motion search, block modes
 hve/transform.py    RCT, MED predictor, context quantisation
@@ -199,21 +267,27 @@ hve/y4m.py          YUV4MPEG2 reader/writer
 hve/cli.py          command line interface
 tools/ladder.py     measures every rung from Huffman to the final codec
 tools/bench_image.py, tools/bench_video.py    benchmarks with losslessness verified
+tools/quick.py      dev-set size reading in ~2s, the A/B harness for model work
 tools/corpus.py     the dev / held-out split, so tuning cannot flatter the results
 tools/headroom.py   ideal cost per predictor: is the gap in prediction or coding?
 tools/ctx_study.py, tools/pred_study.py, tools/tune.py   the design experiments
+playground/         setup + a friendly CLI for trying it on ordinary jpg/mp4
+                    files; nothing here is part of the codec
+docs/HANDOFF.md     start here: state, environment, workflow, what to do next
 docs/research.md    every technique surveyed and what it measured — including the
-                    ones that made things worse
-tests/              36 tests: roundtrips, edge cases, coder internals
+                    eight that were built and rejected
+tests/              39 tests: roundtrips, edge cases, coder internals,
+                    and byte-exactness between the two code paths
 ```
 
 ## Running it
 
 ```bash
-pip install numpy pillow                 # imagecodecs and pytest for benchmarks/tests
+pip install numpy pillow                 # numba makes stills ~30x faster
+                                         # imagecodecs and pytest for benchmarks/tests
 python -m pytest tests -q
 python tools/fetch_testdata.py           # Kodak photos + Xiph clips (not committed)
 python tools/ladder.py testdata/images/*.png
-python tools/bench_image.py test          # held-out split; "dev" or "all" also work
+python tools/bench_image.py --jobs=12 test   # held-out split; "dev"/"all" also work
 python tools/bench_video.py testdata/video/akiyo_cif.y4m 16
 ```

@@ -231,6 +231,53 @@ def test_match_model_does_not_cost_on_unrepetitive_data():
     assert np.array_equal(image.decode(image.encode(photo)), photo)
 
 
+def _reference_payload(planes):
+    """The pure-Python path, run directly, for comparison against the jitted one."""
+    from hve import rc as _rc
+    coder = _rc.Encoder()
+    bank = model.new_model()
+    luma = None
+    h, w = planes.shape[1], planes.shape[2]
+    for i, plane in enumerate(planes):
+        _, err = model.code_plane(coder, True, w, h, min(i, 3), bank,
+                                  src=plane.tolist(),
+                                  luma_err=luma if i in (1, 2) else None)
+        if i == 0:
+            luma = err
+    return coder.finish()
+
+
+def test_fast_path_is_byte_identical():
+    """The jitted path is a second implementation of the format's core loop.
+
+    A one-bit divergence would silently corrupt every file written by whichever
+    path happened to run, so the two must agree exactly, not merely closely.
+    """
+    from hve import fast
+    if not fast.available():
+        pytest.skip("numba not installed")
+    from PIL import Image as PILImage
+    cases = [np.array(PILImage.open(PHOTO).convert("RGB"))[:48, :64],
+             synthetic(33, 51, 3),
+             np.random.default_rng(7).integers(0, 256, (24, 24, 3), dtype=np.uint8)]
+    for img in cases:
+        planes, _ = image._planes_from_image(img)
+        planes = np.ascontiguousarray(planes)
+        assert fast.encode_planes(planes) == _reference_payload(planes)
+
+
+def test_fast_path_roundtrips():
+    from hve import fast
+    if not fast.available():
+        pytest.skip("numba not installed")
+    img = synthetic(40, 56, 3)
+    planes, _ = image._planes_from_image(img)
+    planes = np.ascontiguousarray(planes)
+    blob = fast.encode_planes(planes)
+    back = fast.decode_planes(blob, planes.shape[0], planes.shape[1], planes.shape[2])
+    assert np.array_equal(back, planes)
+
+
 def test_image_rejects_foreign_container():
     with pytest.raises(ValueError):
         image.decode(b"XXXX" + b"\0" * 32)
@@ -298,6 +345,29 @@ def test_video_block_size_travels_in_the_header():
         video.BLOCK = original
     for want, got in zip(frames, out):
         assert np.array_equal(want[0], got[0])
+
+
+def test_video_fast_path_is_byte_identical():
+    """Video shares the kernel via the inter branch; pin it the same way."""
+    from hve import fast
+    if not fast.available():
+        pytest.skip("numba not installed")
+    base = [synthetic(32, 48, 1, seed=0), synthetic(16, 24, 1, seed=1),
+            synthetic(16, 24, 1, seed=2)]
+    frames = [[np.roll(p, i * 3, axis=1) for p in base] for i in range(4)]
+
+    real = fast.available
+    try:
+        fast.available = lambda: False
+        reference = video.encode(frames)
+    finally:
+        fast.available = real
+    assert video.encode(frames) == reference
+
+    out = video.decode(reference)
+    for want, got in zip(frames, out):
+        for a, b in zip(want, got):
+            assert np.array_equal(a, b)
 
 
 def test_video_rejects_foreign_container():

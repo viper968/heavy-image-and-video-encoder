@@ -9,7 +9,7 @@ spatial neighbours.
 
 import numpy as np
 
-from . import model, rc
+from . import fast, model, rc
 from .bitio import Reader, Writer
 from .transform import predict_plane, rct_forward, rct_inverse
 
@@ -162,6 +162,90 @@ def code_block_info(coder, encode, bank, nby, nbx, modes=None, mvs=None):
 
 
 # --------------------------------------------------------------------------
+# jitted path
+
+
+def _inter_tuple(modes_i, mvs_i, block, sy, sx, ref):
+    return (1, modes_i, mvs_i, max(1, block // sy), max(1, block // sx), sy, sx, ref)
+
+
+def _encode_payload_fast(frames, block, luma_h, luma_w, progress):
+    """Same frame loop as the reference below, with the jitted primitives.
+
+    Motion search stays in numpy and block decisions stay here; only the
+    per-pixel coding and the block-info bits cross into the kernel.
+    """
+    samples = sum(p.size for p in _to_planes(frames[0])[0]) * len(frames)
+    coder = fast.Coder(True, capacity=samples * 2 + 65536)
+    bank = fast.Bank(video=True)
+    errmap = np.zeros((luma_h, luma_w), dtype=np.int64)
+    flat = np.zeros(luma_h * luma_w, dtype=np.int64)
+    prev = None
+
+    for fi, frame in enumerate(frames):
+        planes, _ = _to_planes(frame)
+        cur = [np.ascontiguousarray(p, dtype=np.int64) for p in planes]
+        if prev is None:
+            for i, pl in enumerate(cur):
+                bank.code(coder, True, pl, min(i, 3), 1 if i in (1, 2) else 0,
+                          1 if i == 0 else 0, errmap, flat)
+        else:
+            modes, mvs = choose_modes(planes[0], prev[0].astype(np.uint8), bs=block)
+            modes_i = np.ascontiguousarray(modes, dtype=np.int64)
+            mvs_i = np.ascontiguousarray(mvs, dtype=np.int64)
+            fast._code_block_info(True, coder.st, coder.data, coder.out, bank.mode_p,
+                                  bank.mv_zero, bank.mv_sign, bank.mv_mag,
+                                  modes_i, mvs_i, MV_MAX)
+            for i, pl in enumerate(cur):
+                ph, pw = pl.shape
+                sy = max(1, luma_h // ph)
+                sx = max(1, luma_w // pw)
+                bank.code(coder, True, pl, min(i, 3), 1 if i in (1, 2) else 0,
+                          1 if i == 0 else 0, errmap, flat,
+                          inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, prev[i]))
+        prev = cur
+        if progress:
+            progress(fi, len(frames))
+    return coder.finish()
+
+
+def _decode_payload_fast(payload, shapes, nframes, block, progress):
+    coder = fast.Coder(False, payload=payload)
+    bank = fast.Bank(video=True)
+    luma_h, luma_w = shapes[0]
+    errmap = np.zeros((luma_h, luma_w), dtype=np.int64)
+    flat = np.zeros(luma_h * luma_w, dtype=np.int64)
+    nby, nbx = -(-luma_h // block), -(-luma_w // block)
+    prev = None
+    out = []
+
+    for fi in range(nframes):
+        cur = [np.zeros((h, wd), dtype=np.int64) for (h, wd) in shapes]
+        if prev is None:
+            for i, pl in enumerate(cur):
+                bank.code(coder, False, pl, min(i, 3), 1 if i in (1, 2) else 0,
+                          1 if i == 0 else 0, errmap, flat)
+        else:
+            modes_i = np.zeros((nby, nbx), dtype=np.int64)
+            mvs_i = np.zeros((nby, nbx, 2), dtype=np.int64)
+            fast._code_block_info(False, coder.st, coder.data, coder.out, bank.mode_p,
+                                  bank.mv_zero, bank.mv_sign, bank.mv_mag,
+                                  modes_i, mvs_i, MV_MAX)
+            for i, pl in enumerate(cur):
+                ph, pw = pl.shape
+                sy = max(1, luma_h // ph)
+                sx = max(1, luma_w // pw)
+                bank.code(coder, False, pl, min(i, 3), 1 if i in (1, 2) else 0,
+                          1 if i == 0 else 0, errmap, flat,
+                          inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, prev[i]))
+        prev = cur
+        out.append([p.astype(np.uint8) for p in cur])
+        if progress:
+            progress(fi, nframes)
+    return out
+
+
+# --------------------------------------------------------------------------
 # container
 
 
@@ -192,11 +276,18 @@ def encode(frames, progress=None):
         w.varint(p.shape[1])
         w.varint(p.shape[0])
 
+    block = BLOCK
+    luma_h, luma_w = first[0].shape
+
+    if fast.available():
+        payload = _encode_payload_fast(frames, block, luma_h, luma_w, progress)
+        w.varint(len(payload))
+        w.raw(payload)
+        return w.bytes()
+
     coder = rc.Encoder()
     bank = new_video_model()
     prev_rows = None
-    block = BLOCK
-    luma_h, luma_w = first[0].shape
 
     for fi, frame in enumerate(frames):
         planes, _ = _to_planes(frame)
@@ -255,6 +346,12 @@ def decode(data, progress=None):
         shapes.append((ph, pw))
     payload_len = r.varint()
     payload = r.raw(payload_len)
+
+    if fast.available():
+        out = []
+        for planes in _decode_payload_fast(payload, shapes, nframes, block, progress):
+            out.append(rct_inverse(planes) if flags & FLAG_RCT else planes)
+        return out
 
     coder = rc.Decoder(payload)
     bank = new_video_model()
