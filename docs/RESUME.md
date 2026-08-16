@@ -72,11 +72,18 @@ images hve went from 653.6s CPU to **21.1s** — now faster than both lossless
 WebP (192.3s) and JPEG XL effort 9 (65.1s), at identical output sizes. README
 updated.
 
-**Still on the reference path: video.** `hve/video.py` calls
-`model.code_plane(..., inter=...)`, and the kernel does not cover the per-block
-prediction branch. Adding it is the same mirroring exercise, pinned by the same
-kind of byte-exactness test. That is the obvious next speed win — video is now
-the only slow path at ~1.1s per CIF frame.
+**Video is jitted too.** `_code_plane1` took an `inter_on` branch and video's
+block-mode and motion-vector coding moved into the kernel as well;
+`hve/video.py` keeps the frame loop and the numpy motion search. Sizes are
+unchanged (325,399 on akiyo, 883,078 on foreman) and
+`test_video_fast_path_is_byte_identical` pins it.
+
+  16 CIF frames encode  17.9s -> 3.1s   (6x)
+  16 CIF frames decode  14.3s -> 0.3s   (48x)
+
+Encode gained least because motion search — full search over +-8 pixels, in
+numpy — now dominates it. If video encode needs to get faster, that search is
+the thing to attack, not the coding loop.
 
 ## After that, in order
 

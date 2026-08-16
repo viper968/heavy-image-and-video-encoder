@@ -347,6 +347,29 @@ def test_video_block_size_travels_in_the_header():
         assert np.array_equal(want[0], got[0])
 
 
+def test_video_fast_path_is_byte_identical():
+    """Video shares the kernel via the inter branch; pin it the same way."""
+    from hve import fast
+    if not fast.available():
+        pytest.skip("numba not installed")
+    base = [synthetic(32, 48, 1, seed=0), synthetic(16, 24, 1, seed=1),
+            synthetic(16, 24, 1, seed=2)]
+    frames = [[np.roll(p, i * 3, axis=1) for p in base] for i in range(4)]
+
+    real = fast.available
+    try:
+        fast.available = lambda: False
+        reference = video.encode(frames)
+    finally:
+        fast.available = real
+    assert video.encode(frames) == reference
+
+    out = video.decode(reference)
+    for want, got in zip(frames, out):
+        for a, b in zip(want, got):
+            assert np.array_equal(a, b)
+
+
 def test_video_rejects_foreign_container():
     with pytest.raises(ValueError):
         video.decode(b"XXXX" + b"\0" * 32)

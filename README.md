@@ -161,7 +161,8 @@ and several of them can be *mixed* per bit rather than one being chosen.
    probabilities, no transmitted tables.
 
 `hve/model.py` is the readable reference implementation and the definition of
-the format. `hve/fast.py` is the same loop compiled by numba, used
+the format. `hve/fast.py` is the same loop compiled by numba — covering both
+stills and video, including video's per-block prediction branch — used
 automatically when numba is installed. Keeping two implementations of a codec's
 core loop is exactly how formats get silently corrupted, so a test requires
 them to emit **byte-identical** bitstreams — drift fails loudly instead of
@@ -182,14 +183,14 @@ are coded at their native subsampled size.
 
 ## Honest limitations
 
-- **Stills are fast now; video is not.** A 768x512 photo encodes in 0.29s and
-  decodes in 0.16s on a 12th-gen i5 — 33x and 56x faster than the pure-Python
-  loop this started as — because `hve/fast.py` compiles the per-pixel path with
-  numba. Video still runs the reference path at about 1.1s per CIF frame; the
-  kernel does not yet cover its per-block prediction branch. Everything is
-  single-threaded; `tools/bench_image.py --jobs=N` parallelises across images,
-  not within one. Without numba installed the codec still works, just at the
-  original speed. The algorithms are all O(pixels) — the constant is Python. A C port
+- **Speed** (12th-gen i5, Python 3.14, numba compiling the per-pixel path):
+  a 768x512 photo encodes in 0.29s and decodes in 0.16s, 33x and 56x faster
+  than the pure-Python loop this started as. 16 CIF video frames encode in 3.1s
+  and decode in 0.3s — 6x and 48x. Video *encode* is now dominated by motion
+  search rather than by coding, so it gained least; decode, which has no search
+  to do, gained most. Everything is single-threaded; `tools/bench_image.py
+  --jobs=N` parallelises across images, not within one. Without numba the codec
+  still works, just at the original speed. The algorithms are all O(pixels) — the constant is Python. A C port
   would land in the same class as the codecs it is compared against.
 - **JPEG XL still wins on stills** by 6.9% on held-out images. Context mixing,
   secondary estimation, a self-correcting weighted predictor and an online
@@ -212,8 +213,8 @@ hve/rc.py           adaptive binary range coder (the entropy engine)
 hve/mix.py          logistic mixing + secondary estimation (stretch/squash, Mixer, APM)
 hve/model.py        weighted predictor, match model, context model, residual
                     binarisation — the readable reference, shared by image+video
-hve/fast.py         the same still-image loop compiled with numba, pinned
-                    byte-identical to model.py by a test
+hve/fast.py         the same loop compiled with numba, for stills and video
+                    alike, pinned byte-identical to model.py by tests
 hve/image.py        .hvi still-image container
 hve/video.py        .hvv video container, motion search, block modes
 hve/transform.py    RCT, MED predictor, context quantisation
@@ -228,7 +229,7 @@ tools/headroom.py   ideal cost per predictor: is the gap in prediction or coding
 tools/ctx_study.py, tools/pred_study.py, tools/tune.py   the design experiments
 docs/research.md    every technique surveyed and what it measured — including the
                     ones that made things worse
-tests/              38 tests: roundtrips, edge cases, coder internals,
+tests/              39 tests: roundtrips, edge cases, coder internals,
                     and byte-exactness between the two code paths
 ```
 
