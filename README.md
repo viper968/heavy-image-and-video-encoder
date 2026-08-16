@@ -21,13 +21,16 @@ Every constant in this codec was chosen by measuring compressed size, so the six
 images used for tuning cannot also carry the headline number. These 18 are the
 held-out split (`tools/corpus.py`); no parameter has ever been fitted to them.
 
-| codec | bytes | bpp | ratio | verified |
-|---|---:|---:|---:|---|
-| JPEG XL, effort 9 | 7,207,847 | 8.15 | 2.95x | lossless |
-| JPEG XL, effort 7 | 7,305,646 | 8.26 | 2.91x | lossless |
-| **hve** | **7,854,553** | **8.88** | **2.70x** | lossless |
-| WebP lossless | 8,099,860 | 9.16 | 2.62x | lossless |
-| PNG (optimised) | 11,321,001 | 12.80 | 1.88x | lossless |
+| codec | bytes | bpp | ratio | cpu s | verified |
+|---|---:|---:|---:|---:|---|
+| JPEG XL, effort 9 | 7,207,847 | 8.15 | 2.95x | 65.1 | lossless |
+| JPEG XL, effort 7 | 7,305,646 | 8.26 | 2.91x | 17.1 | lossless |
+| **hve** | **7,854,553** | **8.88** | **2.70x** | **21.1** | lossless |
+| WebP lossless | 8,099,860 | 9.16 | 2.62x | 192.3 | lossless |
+| PNG (optimised) | 11,321,001 | 12.80 | 1.88x | 6.0 | lossless |
+
+`cpu s` is encode **and** decode for all 18 images, measured the same way for
+every codec.
 
 30.6% smaller than PNG, 3.0% smaller than lossless WebP, 9.0% larger than
 JPEG XL. **JPEG XL is still ahead** — `docs/research.md` records what was tried
@@ -157,6 +160,13 @@ and several of them can be *mixed* per bit rather than one being chosen.
 6. **Adaptive binary range coder** (`hve/rc.py`) — LZMA-style, 15-bit
    probabilities, no transmitted tables.
 
+`hve/model.py` is the readable reference implementation and the definition of
+the format. `hve/fast.py` is the same loop compiled by numba, used
+automatically when numba is installed. Keeping two implementations of a codec's
+core loop is exactly how formats get silently corrupted, so a test requires
+them to emit **byte-identical** bitstreams — drift fails loudly instead of
+quietly writing files only one path can read.
+
 **Video** (`hve/video.py`)
 
 The first frame is coded as a still image. Every later frame is split into 16x16
@@ -172,12 +182,14 @@ are coded at their native subsampled size.
 
 ## Honest limitations
 
-- **It is slow, and got slower.** This is a readable Python reference
-  implementation: ~10s to encode and ~9s to decode a 768x512 photo on a
-  12th-gen i5 under Python 3.14, up from 3.2s before the mixing layer went in —
-  context mixing and secondary estimation run per coded bit. Video is about 1.1s
-  per CIF frame. It is also strictly single-threaded; `tools/bench_image.py
-  --jobs=N` parallelises across images, not within one. The algorithms are all O(pixels) — the constant is Python. A C port
+- **Stills are fast now; video is not.** A 768x512 photo encodes in 0.29s and
+  decodes in 0.16s on a 12th-gen i5 — 33x and 56x faster than the pure-Python
+  loop this started as — because `hve/fast.py` compiles the per-pixel path with
+  numba. Video still runs the reference path at about 1.1s per CIF frame; the
+  kernel does not yet cover its per-block prediction branch. Everything is
+  single-threaded; `tools/bench_image.py --jobs=N` parallelises across images,
+  not within one. Without numba installed the codec still works, just at the
+  original speed. The algorithms are all O(pixels) — the constant is Python. A C port
   would land in the same class as the codecs it is compared against.
 - **JPEG XL still wins on stills** by 6.9% on held-out images. Context mixing,
   secondary estimation, a self-correcting weighted predictor and an online
@@ -199,7 +211,9 @@ are coded at their native subsampled size.
 hve/rc.py           adaptive binary range coder (the entropy engine)
 hve/mix.py          logistic mixing + secondary estimation (stretch/squash, Mixer, APM)
 hve/model.py        weighted predictor, match model, context model, residual
-                    binarisation — one loop, shared by image and video paths
+                    binarisation — the readable reference, shared by image+video
+hve/fast.py         the same still-image loop compiled with numba, pinned
+                    byte-identical to model.py by a test
 hve/image.py        .hvi still-image container
 hve/video.py        .hvv video container, motion search, block modes
 hve/transform.py    RCT, MED predictor, context quantisation
@@ -214,13 +228,15 @@ tools/headroom.py   ideal cost per predictor: is the gap in prediction or coding
 tools/ctx_study.py, tools/pred_study.py, tools/tune.py   the design experiments
 docs/research.md    every technique surveyed and what it measured — including the
                     ones that made things worse
-tests/              36 tests: roundtrips, edge cases, coder internals
+tests/              38 tests: roundtrips, edge cases, coder internals,
+                    and byte-exactness between the two code paths
 ```
 
 ## Running it
 
 ```bash
-pip install numpy pillow                 # imagecodecs and pytest for benchmarks/tests
+pip install numpy pillow                 # numba makes stills ~30x faster
+                                         # imagecodecs and pytest for benchmarks/tests
 python -m pytest tests -q
 python tools/fetch_testdata.py           # Kodak photos + Xiph clips (not committed)
 python tools/ladder.py testdata/images/*.png
