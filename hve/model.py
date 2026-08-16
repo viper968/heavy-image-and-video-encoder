@@ -112,6 +112,10 @@ def new_model():
         "mant": rc.new_probs(KINDS * (MAX_NB + 1) * 2),
         "zero_mix": mix.Mixer(ZERO_EXPERTS, KINDS * NACT),
         "zero_apm": mix.APM(KINDS * NACT),
+        # LPAQ chains two secondary-estimation stages with different contexts.
+        # This one sees the match state, which the activity-keyed first stage
+        # cannot; both are blended 1:3 with their input the way LPAQ does.
+        "zero_apm2": mix.APM(KINDS * NMEXP * NMSIGN),
         # The magnitude bins get secondary estimation too. They are the second
         # biggest cost after the zero flag, and a full mixer there was measured
         # to cost more time than it returned.
@@ -176,6 +180,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
     mant_p = model["mant"]
     zero_mix = model["zero_mix"]
     zero_apm = model["zero_apm"]
+    zero_apm2 = model["zero_apm2"]
     nb_apm = model["nb_apm"]
     bit = coder.bit
     bypass = coder.bypass
@@ -385,6 +390,8 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
             mix_ctx = kind_mix + act_b
             pr1 = zero_mix.mix(experts, mix_ctx)
             pr1 = (pr1 + 3 * zero_apm.refine(pr1, mix_ctx)) >> 2
+            actx2 = (b_kind * NMEXP + mexp_b) * NMSIGN + msign
+            pr1 = (pr1 + 3 * zero_apm2.refine(pr1, actx2)) >> 2
             if pr1 < 1:
                 pr1 = 1
             elif pr1 > 4095:
@@ -402,6 +409,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 _adapt(match_p, match_ctx, nonzero)
                 zero_mix.update(nonzero)
                 zero_apm.update(nonzero)
+                zero_apm2.update(nonzero)
                 if mag:
                     bit(sign_p, b_sign + sgn * NMSIGN + msign, 1 if d < 0 else 0)
                     v = mag - 1
@@ -440,6 +448,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 _adapt(match_p, match_ctx, nonzero)
                 zero_mix.update(nonzero)
                 zero_apm.update(nonzero)
+                zero_apm2.update(nonzero)
                 if nonzero:
                     neg = bit(sign_p, b_sign + sgn * NMSIGN + msign)
                     nb = 0

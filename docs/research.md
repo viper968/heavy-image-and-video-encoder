@@ -28,6 +28,11 @@ Weighing of Context Models*, the ZPAQ specification, and the FLIF/MANIAC ICIP
 | Online learned context tree (MANIAC-style) | the big one, see below | **-0.1%** | rejected |
 | Match model, hard switch on sustained agreement | the one I'd bet on | **-0.26%** held-out, **8.7x** on repetition | kept |
 | Match value averaged into the predictor blend | — | **+1.3% worse** | rejected |
+| Match's expected sign as a sign-bit context | — | **-0.26%** | kept |
+| Match's expected magnitude as a *split* of the length-bin context | — | **+0.05% worse** | rejected |
+| Match's expected magnitude as a *mixed expert* on the length bins | — | **-0.16%** | kept |
+| Second APM stage keyed on match state (LPAQ chains two) | 0.6-2% | **-0.09%** | kept |
+| Two trend sub-predictors (2W-WW, 2N-NN) in the blend | paq8px calls these strong | **+0.20% worse** | rejected |
 
 ### The three that failed are the informative ones
 
@@ -177,6 +182,41 @@ try it:
 5. **The hybrid-uint token design** — give small residuals their own jointly
    modelled symbol instead of decomposing every one into is-zero / sign /
    unary. Structurally strictly stronger than the current binarisation.
+
+## Where the bits actually go
+
+Measured on three dev images with counters in the encoder (`Bank.stats`), since
+guessing which stage to attack next was clearly not working:
+
+| | |
+|---|---:|
+| average cost | 3.164 bits per plane sample |
+| residuals that are **not** zero | **74.0%** |
+| raw unmodelled bypass mantissa bits | **3.3% of all bits** |
+| mean bit-length of `abs(d)-1` over nonzero residuals | 1.24 |
+
+Two things follow, and both are discouraging for the obvious next steps.
+
+**The hybrid-uint token idea has a hard ceiling of 3.3%**, and would capture
+only a fraction of that. Every bit outside those raw mantissa bits is already
+context-modelled, so a better binarisation can only recover what the bypass
+path throws away.
+
+**74% of residuals are nonzero.** The "is it zero?" flag is therefore not the
+cheap, heavily-skewed decision the design assumes — it costs about 0.83 bits per
+sample, roughly a quarter of the whole file, and the sign bit costs most of
+another quarter. For an unbiased predictor the sign is genuinely incompressible,
+so that quarter is not recoverable by better modelling; it is only recoverable
+by making the residuals *smaller*.
+
+Which puts the remaining gap where the first agent's research said it was: in
+prediction and in the size of the model, not in the entropy coder or the
+binarisation. Every cheap contextual trick here has now returned between 0.1%
+and 0.4%, and four separate attempts to improve prediction have come back
+negative, because this codec's blend is an *averaging* combiner and averaging is
+harmed by volatile predictors even when they are down-weighted. paq8px carries
+~130 predictors into a proper mixing network rather than an average, which is a
+different architecture, not a bigger version of this one.
 
 ## Ruled out on cost
 

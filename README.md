@@ -25,14 +25,14 @@ held-out split (`tools/corpus.py`); no parameter has ever been fitted to them.
 |---|---:|---:|---:|---:|---|
 | JPEG XL, effort 9 | 7,207,847 | 8.15 | 2.95x | 65.1 | lossless |
 | JPEG XL, effort 7 | 7,305,646 | 8.26 | 2.91x | 17.1 | lossless |
-| **hve** | **7,854,553** | **8.88** | **2.70x** | **21.1** | lossless |
+| **hve** | **7,796,932** | **8.81** | **2.72x** | **19.0** | lossless |
 | WebP lossless | 8,099,860 | 9.16 | 2.62x | 192.3 | lossless |
 | PNG (optimised) | 11,321,001 | 12.80 | 1.88x | 6.0 | lossless |
 
 `cpu s` is encode **and** decode for all 18 images, measured the same way for
 every codec.
 
-30.6% smaller than PNG, 3.0% smaller than lossless WebP, 9.0% larger than
+31.1% smaller than PNG, 3.7% smaller than lossless WebP, 8.2% larger than
 JPEG XL. **JPEG XL is still ahead** — `docs/research.md` records what was tried
 against that gap, what each technique was worth when measured, and what is
 left.
@@ -192,7 +192,7 @@ are coded at their native subsampled size.
   --jobs=N` parallelises across images, not within one. Without numba the codec
   still works, just at the original speed. The algorithms are all O(pixels) — the constant is Python. A C port
   would land in the same class as the codecs it is compared against.
-- **JPEG XL still wins on stills** by 6.9% on held-out images. Context mixing,
+- **JPEG XL still wins on stills** by 8.2% on held-out images. Context mixing,
   secondary estimation, a self-correcting weighted predictor and an online
   learned context tree were all built and measured against that gap; the first
   three are in, the fourth was not worth its cost. See `docs/research.md` for

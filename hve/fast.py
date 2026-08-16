@@ -245,9 +245,9 @@ def _code_block_info(encode, st, data, out, mode_p, mv_zero, mv_sign, mv_mag,
 
 def _code_plane1(encode, plane, data, out, st, params,
                  zero_p, dir_p, diff_p, match_p, sign_p, nb_p, nbm_p, mant_p,
-                 mixw, nbmixw, apm0, apm1, stretch, sq,
+                 mixw, nbmixw, apm0, apm1, apm2, stretch, sq,
                  act_l, err_l, lum_l, side_l, diff_l, mexp_l,
-                 match_table, flat, errmap,
+                 match_table, flat, errmap, stats,
                  kind, use_luma, write_errmap,
                  inter_on, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref_plane):
     height = plane.shape[0]
@@ -499,6 +499,12 @@ def _code_plane1(encode, plane, data, out, st, params,
             refined = (apm0[aidx] * (128 - aw) + apm0[aidx + 1] * aw) >> 11
             aupd = aidx + (1 if aw >= 64 else 0)
             pr1 = (pr_mix + 3 * refined) >> 2
+            s3 = stretch[pr1] + 2048
+            aw3 = s3 & 127
+            aidx3 = ((b_kind * 7 + mexp_b) * 4 + msign) * 33 + (s3 >> 7)
+            ref3 = (apm2[aidx3] * (128 - aw3) + apm2[aidx3 + 1] * aw3) >> 11
+            aupd3 = aidx3 + (1 if aw3 >= 64 else 0)
+            pr1 = (pr1 + 3 * ref3) >> 2
             if pr1 < 1:
                 pr1 = 1
             elif pr1 > 4095:
@@ -509,6 +515,8 @@ def _code_plane1(encode, plane, data, out, st, params,
                 d = ((plane[y, x] - pred + 128) & 255) - 128
                 mag = -d if d < 0 else d
                 nonzero = 1 if mag else 0
+                stats[0] += 1
+                stats[1] += nonzero
                 _enc_bit_p(st, out, p_zero, nonzero)
             else:
                 nonzero = _dec_bit_p(st, data, p_zero)
@@ -530,6 +538,7 @@ def _code_plane1(encode, plane, data, out, st, params,
             mixw[mbase + 3] += (ex[3] * err + 0x8000) >> 16
             target = 65535 if nonzero else 0
             apm0[aupd] += (target - apm0[aupd]) >> 7
+            apm2[aupd3] += (target - apm2[aupd3]) >> 7
 
             if encode:
                 if mag:
@@ -540,6 +549,7 @@ def _code_plane1(encode, plane, data, out, st, params,
                     while t:
                         nb += 1
                         t >>= 1
+                    stats[3] += nb
                     limit = nb if nb < max_nb else nb - 1
                     for i in range(limit + 1):
                         more = 1 if i < nb else 0
@@ -582,6 +592,7 @@ def _code_plane1(encode, plane, data, out, st, params,
                                      (v >> (nb - 3)) & 1)
                             if nb > 3:
                                 _enc_bypass(st, out, v & ((1 << (nb - 3)) - 1), nb - 3)
+                                stats[2] += nb - 3
                 value = (pred + d) & 255
             else:
                 if nonzero:
@@ -724,6 +735,7 @@ class Bank:
         self.nbmixw = np.array(bank["nb_mix"].weights, dtype=np.int64)
         self.apm0 = np.array(bank["zero_apm"].table, dtype=np.int64)
         self.apm1 = np.array(bank["nb_apm"].table, dtype=np.int64)
+        self.apm2 = np.array(bank["zero_apm2"].table, dtype=np.int64)
         self.ladders = [np.array(x, dtype=np.int64) for x in
                         (model.ACT_LADDER, model.ERR_LADDER, model.LUMA_LADDER,
                          model.SIDE_LADDER, model.DIFF_LADDER,
@@ -731,6 +743,8 @@ class Bank:
         self.tables = [np.array(mix.STRETCH, dtype=np.int64),
                        np.array(mix.SQUASH, dtype=np.int64)]
         self.match_table = np.zeros(model.MATCH_HASH_MASK + 1, dtype=np.int64)
+        # [pixels, nonzero, bypass bits, sum of nb, zero-flag cost*1024]
+        self.stats = np.zeros(8, dtype=np.int64)
         self.params = _params()
         if video:
             from . import video as _video
@@ -749,8 +763,8 @@ class Bank:
         else:
             on, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref = inter
         _code_plane1(encode, plane, coder.data, coder.out, coder.st, self.params,
-                     *self.arrs, self.mixw, self.nbmixw, self.apm0, self.apm1, *self.tables,
-                     *self.ladders, self.match_table, flat, errmap,
+                     *self.arrs, self.mixw, self.nbmixw, self.apm0, self.apm1, self.apm2, *self.tables,
+                     *self.ladders, self.match_table, flat, errmap, self.stats,
                      kind, use_luma, write_errmap,
                      on, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref)
 
