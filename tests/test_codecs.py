@@ -231,6 +231,18 @@ def test_match_model_does_not_cost_on_unrepetitive_data():
     assert np.array_equal(image.decode(image.encode(photo)), photo)
 
 
+def _payload_with(frames, use_native):
+    """Encode a clip through one specific backend, whatever else is installed."""
+    from hve import native
+    real = native.available
+    try:
+        if not use_native:
+            native.available = lambda: False
+        return video.encode(frames)
+    finally:
+        native.available = real
+
+
 def _reference_payload(planes):
     """The pure-Python path, run directly, for comparison against the jitted one."""
     from hve import rc as _rc
@@ -349,21 +361,31 @@ def test_video_block_size_travels_in_the_header():
 
 
 def test_video_fast_path_is_byte_identical():
-    """Video shares the kernel via the inter branch; pin it the same way."""
-    from hve import fast
+    """Video shares the kernel via the inter branch; pin it the same way.
+
+    Both accelerated backends have to be switched off to reach the reference,
+    not just numba: when this only disabled `fast` it started comparing the
+    native path against itself the moment the C backend landed, and passed
+    without testing anything.
+    """
+    from hve import fast, native
     if not fast.available():
         pytest.skip("numba not installed")
     base = [synthetic(32, 48, 1, seed=0), synthetic(16, 24, 1, seed=1),
             synthetic(16, 24, 1, seed=2)]
     frames = [[np.roll(p, i * 3, axis=1) for p in base] for i in range(4)]
 
-    real = fast.available
+    real_fast, real_native = fast.available, native.available
     try:
         fast.available = lambda: False
+        native.available = lambda: False
         reference = video.encode(frames)
     finally:
-        fast.available = real
+        fast.available, native.available = real_fast, real_native
     assert video.encode(frames) == reference
+
+    fast_bytes = _payload_with(frames, use_native=False)
+    assert fast_bytes == reference
 
     out = video.decode(reference)
     for want, got in zip(frames, out):

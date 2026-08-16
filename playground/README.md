@@ -26,9 +26,14 @@ Then point it at your own files:
 `ffmpeg` is needed for video (`brew install ffmpeg`, `apt install ffmpeg`,
 `xbps-install ffmpeg`). Images work without it.
 
-The **first** encode or decode after install takes an extra ~5 seconds while
-numba compiles the pixel loop. It caches to disk, so every run after that is
-fast. If you see 5s for a small image, that was it — run it again.
+The **first** encode or decode after install takes a few extra seconds while the
+C library and the numba kernels are compiled. Both cache to disk, so every run
+after that is fast. If you see several seconds for a small image, that was it —
+run it again.
+
+Speed depends on what is installed, but the **output bytes never do**: with a C
+compiler you get the native path, without one the numba path (2-4x slower),
+without either pure Python (~30x slower). All three produce identical files.
 
 ## The five commands
 
@@ -92,9 +97,10 @@ assert np.array_equal(image.decode(blob), arr) # always true
 ```
 
 `hve/model.py` is the readable reference implementation and the definition of
-the format; `hve/fast.py` is the same loop compiled with numba and must stay
-byte-identical to it. If you change one, change both and run `pytest tests -q` —
-two tests exist purely to catch the paths diverging. `docs/HANDOFF.md` explains
+the format; `hve/fast.py` is the same loop compiled with numba and `csrc/kernel.c`
+is the same loop again in C. All three must stay byte-identical. If you change
+one, change all three and run `pytest tests -q` — a whole test file exists purely
+to catch the paths diverging. `docs/HANDOFF.md` explains
 the layout, and `docs/research.md` records every technique tried and what it
 measured, including the eleven that were rejected.
 

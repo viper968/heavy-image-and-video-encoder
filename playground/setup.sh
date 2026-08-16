@@ -36,10 +36,18 @@ print("  Pillow  ", PIL.__version__)
 
 try:
     import numba
-    print("  numba   ", numba.__version__, "(fast path enabled)")
+    print("  numba   ", numba.__version__)
 except ImportError:
     ok = False
     print("  numba    MISSING - the codec will still work but ~30x slower")
+
+sys.path.insert(0, ".")
+from hve import native
+if native.available():
+    print("  C backend built (fastest path enabled)")
+else:
+    print("  C backend UNAVAILABLE - falling back to numba.")
+    print("           reason:", native.load_error())
 
 try:
     import imagecodecs

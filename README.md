@@ -35,11 +35,11 @@ held-out split (`tools/corpus.py`); no parameter has ever been fitted to them.
 
 | codec | bytes | bpp | ratio | cpu s | verified |
 |---|---:|---:|---:|---:|---|
-| JPEG XL, effort 9 | 7,207,847 | 8.15 | 2.95x | 63.9 | lossless |
-| JPEG XL, effort 7 | 7,305,646 | 8.26 | 2.91x | 16.3 | lossless |
-| **hve** | **7,711,460** | **8.72** | **2.75x** | **23.6** | lossless |
-| WebP lossless | 8,099,860 | 9.16 | 2.62x | 175.9 | lossless |
-| PNG (optimised) | 11,321,001 | 12.80 | 1.88x | 6.0 | lossless |
+| JPEG XL, effort 9 | 7,207,847 | 8.15 | 2.95x | 60.0 | lossless |
+| JPEG XL, effort 7 | 7,305,646 | 8.26 | 2.91x | 14.8 | lossless |
+| **hve** | **7,711,460** | **8.72** | **2.75x** | **16.4** | lossless |
+| WebP lossless | 8,099,860 | 9.16 | 2.62x | 169.0 | lossless |
+| PNG (optimised) | 11,321,001 | 12.80 | 1.88x | 6.1 | lossless |
 
 `cpu s` is encode **and** decode for all 18 images, measured the same way for
 every codec.
@@ -49,14 +49,14 @@ JPEG XL. **JPEG XL is still ahead** — `docs/research.md` records what was trie
 against that gap, what each technique was worth when measured, and what is
 left.
 
-The last change was the largest single one: replacing the error-weighted
-averaging blend with a *learned* combiner over a wider predictor set closed the
-gap from 8.2% to 7.0%. It cost about 24% more time (19.0s to 23.6s), which is
-the trade this codec exists to make, and it is still faster than both JPEG XL
-effort 9 and lossless WebP. Treat the `cpu s` column as approximate: a repeat
-run of this same benchmark moved JPEG XL e9 from 63.9s to 77.9s on identical
-code, so cross-run timing differences under about 20% are machine load, not
-signal. The byte counts are exact and reproducible.
+The largest single compression change was replacing the error-weighted averaging
+blend with a *learned* combiner over a wider predictor set, which closed the gap
+from 8.2% to 7.0%. The bytes have not moved since; the `cpu s` column has,
+because the codec's core loop is now compiled C (23.6s to 16.4s for the same
+output). Treat that column as approximate: a repeat run of this same benchmark
+moved JPEG XL e9 from 63.9s to 77.9s on identical code, so cross-run timing
+differences under about 20% are machine load, not signal. The byte counts are
+exact and reproducible.
 
 Measured with libjxl 0.12.0, libwebp 1.6.0, Pillow 12.3.0. An earlier run on
 libjxl 0.11 put JPEG XL at 7,346,399 and the gap at 6.9%; hve produced byte-
@@ -87,7 +87,7 @@ High-motion content used to be where this lost. Same 16-frame test on
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| **hve** | **834,879** | **2.91x** | lossless |
+| **hve** | **834,903** | **2.91x** | lossless |
 | x264 lossless | 846,081 | 2.88x | lossless |
 | AV1 lossless | 851,838 | 2.86x | lossless |
 | x265 lossless | 852,986 | 2.85x | lossless |
@@ -123,18 +123,32 @@ property of the content.
 
 | codec | bytes | ratio | enc s | verified |
 |---|---:|---:|---:|---|
-| **hve** | **30,966** | **1607x** | 19.8 | lossless |
-| x264 lossless | 34,607 | 1438x | 0.4 | lossless |
-| AV1 lossless | 43,372 | 1147x | 2.7 | lossless |
-| x265 lossless | 46,281 | 1075x | 2.2 | lossless |
-| VP9 lossless | 50,265 | 990x | 1.4 | lossless |
-| FFV1 level 3 | 521,316 | 95x | 0.4 | lossless |
+| **hve** | **30,944** | **1608x** | 3.0 | lossless |
+| x264 lossless | 34,607 | 1438x | 0.3 | lossless |
+| AV1 lossless | 43,372 | 1147x | 1.5 | lossless |
+| x265 lossless | 46,281 | 1075x | 1.3 | lossless |
+| VP9 lossless | 50,265 | 990x | 0.7 | lossless |
+| FFV1 level 3 | 521,316 | 95x | 0.2 | lossless |
 
-10.5% smaller than x264 and 29% smaller than AV1 — **and roughly 50x slower to
-encode**. Encoding was 145s before the motion search was rewritten and is 19.8s
-now, but that is a different scale of answer from x264's 0.4s, and no amount of
-tuning inside numpy and numba closes it. `docs/research.md` records what the
-remaining time is spent on and what closing it would actually take.
+10.5% smaller than x264 and 29% smaller than AV1 — and now within **about 10x**
+of x264's encode time rather than the 50x this README used to claim, on a clip
+where it is also faster than AV1 and x265 were when this table was first
+written.
+
+That number has moved twice and the honest version of the story is:
+
+- 145s, when the motion search was 289 full-frame numpy passes per frame;
+- 19.8s after rewriting the search — but that figure included numba's cold
+  compilation. Measured warm, the numba path does this clip in **9.8s**, so the
+  old "50x slower than x264" was inflated by about 2x and should have been ~25x;
+- **2.7s warm** now that the core loop is compiled C and the motion search is
+  threaded, which is what the 3.0s above measures from cold.
+
+The motion search itself went from 4.4s to 0.12s, because every block's search
+is independent and so threads across cores for free. The remaining 2.5s is the
+pixel loop, which is strictly serial — every pixel depends on all prior ones —
+and cannot be threaded without changing the format. `docs/research.md` records
+what that change would cost.
 
 Reproduce with `python tools/bench_image.py test` and
 `python tools/bench_video.py testdata/video/akiyo_cif.y4m 16`. Every baseline is
@@ -258,15 +272,18 @@ are coded at their native subsampled size.
 
 ## Honest limitations
 
-- **Speed** (12th-gen i5, Python 3.14, numba compiling the per-pixel path):
-  a 768x512 photo encodes in 0.29s and decodes in 0.16s, 33x and 56x faster
-  than the pure-Python loop this started as. 16 CIF video frames encode in 3.1s
-  and decode in 0.3s — 6x and 48x. Video *encode* is now dominated by motion
-  search rather than by coding, so it gained least; decode, which has no search
-  to do, gained most. Everything is single-threaded; `tools/bench_image.py
-  --jobs=N` parallelises across images, not within one. Without numba the codec
-  still works, just at the original speed. The algorithms are all O(pixels) — the constant is Python. A C port
-  would land in the same class as the codecs it is compared against.
+- **Speed** (12th-gen i5, 16 cores, Python 3.14, core loop compiled from
+  `csrc/`): 16 CIF video frames encode in 0.42s and decode in 0.37s; 16 frames
+  of 1080p encode in 2.7s and decode in 2.6s. The **motion search is threaded**
+  and costs almost nothing now (0.12s at 1080p), so encode time is essentially
+  the pixel loop, which is **strictly serial and single-threaded** because every
+  pixel depends on all prior ones. That is a property of the format, not of the
+  implementation, and it is the remaining reason encode is ~10x slower than
+  x264 rather than comparable. The C library is built automatically on first
+  import; without a compiler the codec falls back to numba (~2-4x slower) and
+  without numba to pure Python (~30x slower), producing identical bytes either
+  way. `tools/bench_image.py --jobs=N` parallelises across images, not within
+  one.
 - **JPEG XL still wins on stills** by 7.0% on held-out images. Nineteen
   techniques have been built and measured against that gap; eight are in and
   eleven were rejected, several of them ideas the literature rates highly.
@@ -295,6 +312,11 @@ hve/model.py        weighted predictor, learned combiner, match model, context
                     shared by image+video
 hve/fast.py         the same loop compiled with numba, for stills and video
                     alike, pinned byte-identical to model.py by tests
+hve/native.py       loads and binds the C backend; builds it on first import
+csrc/kernel.c       the same loop again, in C — the fastest of the three
+csrc/motion.c       threaded motion search (encoder only, no format impact)
+csrc/hve.h          shared structs, and the floor-division and shift helpers
+                    that keep C's integer semantics matching Python's
 hve/image.py        .hvi still-image container
 hve/video.py        .hvv video container, motion search, block modes
 hve/transform.py    RCT, MED predictor, context quantisation
@@ -313,14 +335,15 @@ playground/         setup + a friendly CLI for trying it on ordinary jpg/mp4
 docs/HANDOFF.md     start here: state, environment, workflow, what to do next
 docs/research.md    every technique surveyed and what it measured — including the
                     eight that were built and rejected
-tests/              39 tests: roundtrips, edge cases, coder internals,
-                    and byte-exactness between the two code paths
+tests/              73 tests: roundtrips, edge cases, coder internals, and
+                    byte-exactness between all three code paths
 ```
 
 ## Running it
 
 ```bash
-pip install numpy pillow                 # numba makes stills ~30x faster
+pip install numpy pillow                 # a C compiler makes it fastest; numba
+                                         # is the fallback, pure Python the floor
                                          # imagecodecs and pytest for benchmarks/tests
 python -m pytest tests -q
 python tools/fetch_testdata.py           # Kodak photos + Xiph clips (not committed)

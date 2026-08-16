@@ -9,7 +9,7 @@ spatial neighbours.
 
 import numpy as np
 
-from . import fast, model, rc
+from . import fast, model, native, rc
 from .bitio import Reader, Writer
 from .transform import predict_plane, rct_forward, rct_inverse
 
@@ -188,7 +188,15 @@ def _full_search(cur, ref, bs, radius, nby, nbx):
             view = pad[radius + dy:radius + dy + h, radius + dx:radius + dx + w]
             sums = _block_sums(_residual_cost(cur, view), nby, nbx, bs)
             if best is None:
+                # The seed is (-radius, -radius), not (0, 0). Leaving `mv` at
+                # its zero initialisation here meant that a block whose true
+                # best vector was the very first candidate kept that
+                # candidate's *cost* while reporting the *zero* vector, and
+                # then got motion-compensated from the wrong place. Found by
+                # diffing the C port against this function.
                 best = sums
+                mv[..., 0] = dy
+                mv[..., 1] = dx
                 continue
             better = sums < best
             best = np.where(better, sums, best)
@@ -309,10 +317,23 @@ def spatial_cost(cur, bs=None):
 
 
 def choose_modes(cur_y, ref_y, mv_penalty=48, bs=None):
-    """Pick spatial vs temporal per block, charging a flat price for sending a vector."""
+    """Pick spatial vs temporal per block, charging a flat price for sending a vector.
+
+    The native search is threaded over block rows and picks the same vectors as
+    the numpy one — `tests/test_native.py` compares them block for block on real
+    clips, because a search that merely finds *good* vectors rather than the
+    *same* vectors would quietly turn every future compression measurement into
+    a comparison of two codecs.
+    """
     bs = BLOCK if bs is None else bs
-    bmv, tcost = motion_search(cur_y, ref_y, bs=bs)
-    scost = spatial_cost(cur_y, bs=bs)
+    if native.available():
+        bmv, tcost = native.motion_search(
+            cur_y, ref_y, bs, SEARCH, _COST_BYTE, HALF_PEL_BIAS,
+            PYRAMID_MIN_PIXELS, PYRAMID_LEVELS, REFINE_RADIUS)
+        scost = native.spatial_cost(cur_y, bs, _COST_BYTE)
+    else:
+        bmv, tcost = motion_search(cur_y, ref_y, bs=bs)
+        scost = spatial_cost(cur_y, bs=bs)
     moving = (bmv != 0).any(axis=-1)
     tcost = tcost + np.where(moving, mv_penalty, 0)
     modes = (tcost < scost).astype(np.int32)
@@ -423,6 +444,83 @@ def _phase_rows(rows):
 
 def _inter_tuple(modes_i, mvs_i, block, sy, sx, ref):
     return (1, modes_i, mvs_i, max(1, block // sy), max(1, block // sx), sy, sx, ref)
+
+
+def _native_inter(modes_i, mvs_i, block, sy, sx, prev_plane):
+    return (1, modes_i, mvs_i, max(1, block // sy), max(1, block // sx), sy, sx,
+            native.halfpel_planes(prev_plane))
+
+
+def _encode_payload_native(frames, block, luma_h, luma_w, progress):
+    """Same frame loop as the numba path, through the C kernel.
+
+    Planes stay uint8 the whole way. The numba path widens them to int64 because
+    its kernel and the reference implementation share array types; here nothing
+    is shared, and at 1080p the four half-pel phases of a luma plane are 8 MB as
+    bytes against 66 MB widened.
+    """
+    samples = sum(p.size for p in _to_planes(frames[0])[0]) * len(frames)
+    coder = native.Coder(True, capacity=samples * 2 + 65536)
+    bank = native.Bank(luma_h, luma_w, video=True)
+    prev = None
+
+    for fi, frame in enumerate(frames):
+        planes, _ = _to_planes(frame)
+        cur = [np.ascontiguousarray(p, dtype=np.uint8) for p in planes]
+        if prev is None:
+            for i, pl in enumerate(cur):
+                bank.code(coder, True, pl, min(i, 3), 1 if i in (1, 2) else 0,
+                          1 if i == 0 else 0)
+        else:
+            modes, mvs = choose_modes(cur[0], prev[0], bs=block)
+            modes_i = np.ascontiguousarray(modes, dtype=np.int64)
+            mvs_i = np.ascontiguousarray(mvs, dtype=np.int64)
+            bank.code_block_info(coder, True, modes_i, mvs_i, MV_MAX)
+            for i, pl in enumerate(cur):
+                ph, pw = pl.shape
+                sy = max(1, luma_h // ph)
+                sx = max(1, luma_w // pw)
+                bank.code(coder, True, pl, min(i, 3), 1 if i in (1, 2) else 0,
+                          1 if i == 0 else 0,
+                          inter=_native_inter(modes_i, mvs_i, block, sy, sx,
+                                              prev[i]))
+        prev = cur
+        if progress:
+            progress(fi, len(frames))
+    return coder.finish()
+
+
+def _decode_payload_native(payload, shapes, nframes, block, progress):
+    coder = native.Coder(False, payload=payload)
+    luma_h, luma_w = shapes[0]
+    bank = native.Bank(luma_h, luma_w, video=True)
+    nby, nbx = -(-luma_h // block), -(-luma_w // block)
+    prev = None
+    out = []
+
+    for fi in range(nframes):
+        cur = [np.zeros((h, wd), dtype=np.uint8) for (h, wd) in shapes]
+        if prev is None:
+            for i, pl in enumerate(cur):
+                bank.code(coder, False, pl, min(i, 3), 1 if i in (1, 2) else 0,
+                          1 if i == 0 else 0)
+        else:
+            modes_i = np.zeros((nby, nbx), dtype=np.int64)
+            mvs_i = np.zeros((nby, nbx, 2), dtype=np.int64)
+            bank.code_block_info(coder, False, modes_i, mvs_i, MV_MAX)
+            for i, pl in enumerate(cur):
+                ph, pw = pl.shape
+                sy = max(1, luma_h // ph)
+                sx = max(1, luma_w // pw)
+                bank.code(coder, False, pl, min(i, 3), 1 if i in (1, 2) else 0,
+                          1 if i == 0 else 0,
+                          inter=_native_inter(modes_i, mvs_i, block, sy, sx,
+                                              prev[i]))
+        prev = cur
+        out.append([p.copy() for p in cur])
+        if progress:
+            progress(fi, nframes)
+    return out
 
 
 def _encode_payload_fast(frames, block, luma_h, luma_w, progress):
@@ -545,8 +643,10 @@ def encode(frames, progress=None):
     block = BLOCK
     luma_h, luma_w = first[0].shape
 
-    if fast.available():
-        payload = _encode_payload_fast(frames, block, luma_h, luma_w, progress)
+    if native.available() or fast.available():
+        build = (_encode_payload_native if native.available()
+                 else _encode_payload_fast)
+        payload = build(frames, block, luma_h, luma_w, progress)
         w.varint(len(payload))
         w.raw(payload)
         return w.bytes()
@@ -614,9 +714,11 @@ def decode(data, progress=None):
     payload_len = r.varint()
     payload = r.raw(payload_len)
 
-    if fast.available():
+    if native.available() or fast.available():
+        run = (_decode_payload_native if native.available()
+               else _decode_payload_fast)
         out = []
-        for planes in _decode_payload_fast(payload, shapes, nframes, block, progress):
+        for planes in run(payload, shapes, nframes, block, progress):
             out.append(rct_inverse(planes) if flags & FLAG_RCT else planes)
         return out
 

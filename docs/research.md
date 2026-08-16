@@ -245,15 +245,19 @@ differential — including one against a median of neighbours — to exactly
 `MV_MAX`. Synthetic content did not reproduce it, so the regression test uses
 the real clips and asserts the bound directly.
 
-### What is left, and why 50x is not closable here
+### What was left, and what the C port then did about it
 
-Encode splits about evenly now: 8.6s of search and 11s of coding. The coding
-loop is already compiled, runs at roughly 200ns per sample across 50M samples,
-and is inherently serial — every pixel depends on all prior ones, so there is no
-parallelism to find without changing the format. Getting from 19.8s to anything
-near x264's 0.4s needs a C implementation and multiple threads, which means the
-slice-independent format change described under "What would actually close the
-gap". Nothing inside numpy and numba gets there.
+Encode split about evenly at that point: 8.6s of search and 11s of coding. The
+prediction recorded here was that closing the rest needed a C implementation and
+threads. The C implementation was then written; this is what it actually bought,
+and where the prediction was wrong.
+
+**First, a correction to the baseline.** The 19.8s above included numba's
+cold-start compilation. Measured warm — the codec encoding its second clip, which
+is the honest number for a codec — the numba path does 16 frames of 1080p in
+**9.8s**, not 19.8s. Every speedup below is quoted against the warm number.
+Anything quoted against 19.8s is inflated by roughly 2x, and the earlier
+"~50x slower than x264" was inflated the same way.
 
 One real waste was found and removed: the learned combiner was computing
 thirteen multiply-accumulates, a division and thirteen weight updates for every
@@ -262,10 +266,140 @@ sample. Skipping it there was faster **and 0.21% smaller** on the held-out
 clips, because the confidence context had been feeding the mixer spatial
 information that is misleading on a temporally predicted pixel.
 
+## The C port: where the factor of four came from
+
+`csrc/kernel.c` and `csrc/motion.c`, loaded through `hve/native.py`. Output is
+byte-identical to both other paths on every test — that is the whole constraint,
+and `tests/test_native.py` compares bytes rather than sizes.
+
+Best of three runs, native and numba interleaved so machine drift hits both:
+
+| workload | stage | numba | native | |
+|---|---|---:|---:|---:|
+| 4 Kodak photos | encode | 1.63s | 0.95s | 1.7x |
+| | decode | 1.03s | 0.85s | 1.2x |
+| foreman CIF x16 | search | 1.44s | 0.061s | **23.5x** |
+| | encode | 2.11s | 0.42s | 5.0x |
+| | decode | 0.47s | 0.37s | 1.3x |
+| Sintel 1080p x16 | search | 4.42s | 0.119s | **37.1x** |
+| | encode | 9.82s | 2.74s | 3.6x |
+| | decode | 4.37s | 2.55s | 1.7x |
+
+Against x264's 0.4s on the same 1080p clip, encode goes from ~25x slower to
+**~7x slower**. That is a different category of number, but it is not parity and
+this document should not pretend otherwise.
+
+### Why C beat numba, given that numba compiles too
+
+"C is faster" is not an explanation — numba emits LLVM IR and usually lands
+within a factor of two of C on a loop like this, which is roughly what the
+decode column shows (1.2x-1.7x). The large numbers are all structural:
+
+**The search is threaded, and that is a property of the problem, not the
+language.** Every block's search is independent through the whole pyramid, so
+the outer loop over block rows hands out to as many cores as there are. That is
+30x-40x on a 16-core machine and needs no format change at all, because motion
+estimation is an encoder-side decision that the decoder never repeats.
+
+**The search was reordered.** numpy is only fast at whole-frame shapes, so it
+iterates search positions outside and blocks inside, materialising a full-frame
+cost map per position. In C the loop nest inverts: blocks outside, positions
+inside, the running best in a register and the reference window in L1. Most of
+the single-threaded gain is this, not the code generation.
+
+**The scratch buffers are narrower.** `fast.py` shares its arrays with the
+reference implementation's Python lists and so carries everything as int64. In C
+nothing is shared, so the match model's history is `uint8` (it holds pixel
+values) and its hash table is `int32` (it holds sample indices). At 1080p that
+is 6 MB of random-access working set instead of 24 MB.
+
+**The per-pixel divisions got cheaper.** The self-correcting blend does four
+divisions by a small sum of recent errors; those are now a 2048-entry table with
+a fallback above it, so a parameter sweep that widens the range loses the speed
+rather than the correctness. The two divisions that remain have operands that
+provably fit in 32 bits, and a 32-bit `idiv` costs meaningfully less than a
+64-bit one. The combiner's weights moved to `int32` for the same reason — they
+are clamped to +-2^20 every update — which also lets its 13-tap dot product and
+13-tap update vectorise.
+
+### What did not work
+
+**Narrowing `stretch` and `squash` to int16.** Six of the seven table lookups
+per pixel hit these two, and at 8 KB each they would fit L1 where 32 KB each do
+not. Measured: inside this machine's +-10% run-to-run noise, in both directions
+across repeats. Reverted, because a change that cannot be measured should not be
+carried. The wider lesson is that this machine's noise floor is about 10% on a
+3-second benchmark, so any single-run claim below that is not a claim.
+
+**Threading the pixel loop.** Still not possible, and this part of the earlier
+prediction holds exactly. One range coder, one adaptive model bank, and every
+pixel depending on all prior ones. The coding loop is now 2.5s of the 2.7s
+encode, so it *is* the remaining cost, and getting past it still needs the
+slice-independent format change described under "What would actually close the
+gap" — at a measured price of roughly 0.3-1% ratio.
+
+### A search bug, found by diffing the port against the original
+
+`_full_search` seeds its running best from the first candidate, which is
+`(-radius, -radius)`, but left the vector array at its zero initialisation. A
+block whose true best match was exactly that first candidate therefore kept that
+candidate's *cost* while reporting the *zero* vector, and was then
+motion-compensated from the wrong place. About one block per CIF frame.
+
+This is the kind of bug that a port finds and a test suite does not: nothing was
+wrong with the output, the codec stayed lossless, and the only symptom was a
+slightly worse ratio. It only surfaced because the C search disagreed with the
+numpy one on exactly one block out of 396 and both had to be explained.
+
+Fixing it is worth, across six clips, **+28 bytes** — that is, nothing, and very
+slightly the wrong way:
+
+| clip | before | after |
+|---|---:|---:|
+| bus | 1,048,000 | 1,048,000 |
+| mobile | 1,204,587 | 1,204,587 |
+| container | 724,219 | 724,245 |
+| akiyo | 316,313 | 316,313 |
+| foreman | 834,879 | 834,903 |
+| Sintel 1080p | 30,966 | **30,944** |
+
+Kept anyway: a search that reports a vector other than the one it scored is a
+trap for anyone who later tries to tune the search, and 0.0007% is not a price.
+
+**But the reason it does not pay is the interesting part.** The correct vector
+at the corner of the search window is expensive to *send* — the magnitude is
+unary, so a large differential is a long run of ones — and the search's cost
+proxy does not know that. It scores residuals only; the price of the vector
+enters just once, as a flat `mv_penalty=48` in `choose_modes`, and not at all in
+the choice between two candidate vectors. Real codecs do rate-distortion
+optimisation here and charge each candidate its actual coding cost. That has
+never been tried in this codec and is now the most concrete untried motion idea,
+ahead of multiple reference frames.
+
+### The cost of a third implementation
+
+There are now three implementations of one loop, and the honest accounting is
+that this is a real maintenance tax: `model.py` defines the format, `fast.py`
+mirrors it in numba, `csrc/` mirrors it in C, and any model change means three
+edits and a byte-identity check. The C is written as a deliberately boring
+transcription — same variable names, same order of operations, same comment
+anchors — specifically so that diffing it against `fast.py` stays possible.
+
+What makes the tax payable is that the failure mode is loud. `tests/test_native.py`
+compares bytes across backends on odd shapes, real photographs and real clips,
+and the pure-Python reference still runs under `NUMBA_DISABLE_JIT=1
+HVE_NO_NATIVE=1`. Worth noting what happened here as a warning: adding the
+native backend silently broke `test_video_fast_path_is_byte_identical`, which
+disabled only the numba path to reach the reference and so began comparing the
+native path against itself. It passed, testing nothing, until it was read.
+
 ### An open finding: the match model costs 7.3% on 1080p Sintel
 
 Disabling the match model entirely makes that clip **28,725 bytes instead of
-30,966**, while the same model *saves* 1.25% on the held-out CIF pair. Two
+30,966**, while the same model *saves* 1.25% on the held-out CIF pair. (Both
+figures predate the `_full_search` fix, which moved the baseline to 30,944; the
+"model off" side has not been re-measured, so treat the loss as ~7.2% and
+re-measure both sides before acting on it.) Two
 hypotheses were tested and both were wrong: suppressing only its override of the
 temporal prediction recovered 0.12% (kept anyway — it is principled and helps
 everywhere), and gating it on a non-flat neighbourhood made every set worse

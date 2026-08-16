@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from . import fast, model, rc
+from . import fast, model, native, rc
 from .bitio import Reader, Writer
 from .transform import predict_plane, rct_forward, rct_inverse, zigzag
 
@@ -62,11 +62,14 @@ def _image_from_planes(planes, channels, flags):
 
 
 def _encode_payload(planes, width, height):
-    """Range-coder payload for the planes, jitted when numba is present.
+    """Range-coder payload for the planes, native or jitted when available.
 
-    Both paths emit the same bytes — `tests/test_codecs.py` pins that exactly —
-    so which one runs is purely a speed question and never a format question.
+    All three paths emit the same bytes — `tests/test_codecs.py` and
+    `tests/test_native.py` pin that exactly — so which one runs is purely a
+    speed question and never a format question.
     """
+    if native.available():
+        return native.encode_planes(planes)
     if fast.available():
         return fast.encode_planes(planes)
     coder = rc.Encoder()
@@ -82,6 +85,8 @@ def _encode_payload(planes, width, height):
 
 
 def _decode_payload(payload, channels, width, height):
+    if native.available():
+        return list(native.decode_planes(payload, channels, height, width))
     if fast.available():
         return list(fast.decode_planes(payload, channels, height, width))
     coder = rc.Decoder(payload)

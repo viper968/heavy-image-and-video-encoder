@@ -7,3 +7,7 @@ testdata/
 
 .venv/
 playground/demo_output/
+# The native library is built from csrc/ on first import, per machine.
+hve/_hve*.so
+hve/_hve*.pyd
+hve/_hve*.dylib

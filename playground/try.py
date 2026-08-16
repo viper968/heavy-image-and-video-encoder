@@ -37,7 +37,7 @@ from PIL import Image                                    # noqa: E402
 
 from hve import image as hve_image                       # noqa: E402
 from hve import video as hve_video                       # noqa: E402
-from hve import fast, y4m                                # noqa: E402
+from hve import fast, native, y4m                        # noqa: E402
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".ppm", ".pgm",
              ".webp", ".gif", ".tga"}
@@ -584,9 +584,13 @@ def main(argv=None):
     add("info", cmd_info, "describe a .hvi or .hvv file", force=False)
 
     args = p.parse_args(argv)
-    if not fast.available():
-        warn("numba is not installed, so this will run roughly 30x slower. "
+    if not native.available() and not fast.available():
+        warn("no C compiler and no numba, so this will run roughly 30x slower. "
              "Output is byte-identical either way. Run ./playground/setup.sh")
+    elif not native.available():
+        warn("no C compiler found, so the numba path is running instead "
+             "(2-4x slower, byte-identical output). Reason: %s"
+             % native.load_error())
     args.func(args)
 
 

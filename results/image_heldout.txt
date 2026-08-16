@@ -1,31 +1,15 @@
-split: test (dev=6 images, held-out test=18 images)
-
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-skip AVIF 'lossless': KeyError
-done kodim02.png
-done kodim03.png
-done kodim04.png
-done kodim06.png
-done kodim15.png
-done kodim07.png
 done kodim09.png
+done kodim06.png
+done kodim07.png
+done kodim15.png
+done kodim04.png
 done kodim14.png
 done kodim12.png
-done kodim11.png
 done kodim10.png
 done kodim16.png
-done kodim17.png
+done kodim11.png
 done kodim20.png
+done kodim17.png
 done kodim18.png
 done kodim21.png
 done kodim22.png
@@ -33,14 +17,16 @@ done kodim24.png
 skip AVIF 'lossless': KeyError
 
 18 images, 7077888 pixels, 21233664 raw bytes
-33.1s wall clock across 12 processes
+30.7s wall clock across 12 processes
 baselines: Pillow 12.3.0, imagecodecs 2026.8.16, libjxl 0.12.0, libwebp 1.6.0
 
 codec                     bytes      bpp    ratio     cpu s  verified
-JPEG XL e9              7207847    8.147    2.95x      63.9  lossless
-JPEG XL e7              7305646    8.257    2.91x      16.3  lossless
-hve                     7711460    8.716    2.75x      23.6  lossless
-WebP lossless           8099860    9.155    2.62x     175.9  lossless
-PNG (optimised)        11321001   12.796    1.88x       6.0  lossless
+JPEG XL e9              7207847    8.147    2.95x      60.0  lossless
+JPEG XL e7              7305646    8.257    2.91x      14.8  lossless
+hve                     7711460    8.716    2.75x      16.4  lossless
+WebP lossless           8099860    9.155    2.62x     169.0  lossless
+PNG (optimised)        11321001   12.796    1.88x       6.1  lossless
 
 hve is +6.99% vs best verified lossless (JPEG XL e9)
+
+[exited with code 0]
