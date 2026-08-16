@@ -35,6 +35,29 @@ HALF_PEL_BIAS = 64      # cost units a half-pel refinement must beat, swept on d
 
 _COST = np.round(np.log2(1.0 + np.arange(129)) * 8).astype(np.int32)
 
+# The same cost, indexed directly by the *wrapped byte difference* rather than
+# by the folded magnitude. `(a - b) & 255` on uint8 is a single subtract with no
+# widening, and the fold is baked into the table, so scoring a search position
+# becomes one subtract and one table lookup instead of a widen, a subtract, an
+# abs, a minimum and a gather. Measured at 51% of search time before this.
+_COST_BYTE = _COST[np.minimum(np.arange(256), 256 - np.arange(256)).clip(0, 128)]
+
+# Coarse-to-fine search. The full search was 289 positions at full resolution
+# for every frame; at 1080p that is 10 seconds per frame and 85% of encode time.
+# Searching a small pyramid first and refining down costs about a tenth of that
+# and finds nearly the same vectors, because a motion vector that is right at
+# full resolution is almost always right to within a pixel at half.
+#
+# "Nearly" is the catch, and it is why this is gated on frame size. Forcing the
+# pyramid on at CIF cost 1.26% on foreman - box-downsampling a 352x288 frame
+# twice throws away the detail that distinguishes one candidate vector from
+# another, and the refinement cannot recover a match the coarse level never
+# pointed at. At CIF an exhaustive search is affordable anyway, so below this
+# many pixels the codec simply does one and gives up nothing.
+PYRAMID_MIN_PIXELS = 300_000
+PYRAMID_LEVELS = 2
+REFINE_RADIUS = 1
+
 
 def new_video_model():
     bank = model.new_model()
@@ -90,6 +113,8 @@ def _block_sums(cost, nby, nbx, bs):
 
 def _residual_cost(a, b):
     """Modular residual magnitude, mapped through a log-ish bit-cost proxy."""
+    if a.dtype == np.uint8 and b.dtype == np.uint8:
+        return _COST_BYTE[np.subtract(a, b, dtype=np.uint8)]
     diff = np.abs(a.astype(np.int32) - b.astype(np.int32))
     return _COST[np.minimum(diff, 256 - diff)]
 
@@ -113,35 +138,106 @@ def _gather_blocks(plane, mv, bs, h, w):
 
 
 def _block_cost_at(cur, planes, mv, bs):
-    """Cost of every block predicted from its own half-pel vector in `mv`."""
+    """Cost of every block predicted from its own half-pel vector in `mv`.
+
+    The phase index joins the gather rather than driving a loop over all four
+    planes. Selecting per block afterwards meant fetching the whole frame four
+    times and discarding three of them, which at 1080p was the single most
+    expensive step left in the search.
+    """
     h, w = cur.shape
     nby, nbx = mv.shape[0], mv.shape[1]
-    phase = (mv[..., 0] & 1) * 2 + (mv[..., 1] & 1)
-    whole = np.stack([mv[..., 0] >> 1, mv[..., 1] >> 1], axis=-1)
-    pad = np.zeros((nby * bs, nbx * bs), dtype=np.int32)
+    phase = ((mv[..., 0] & 1) * 2 + (mv[..., 1] & 1)).astype(np.intp)
+    ys = (np.arange(nby)[:, None] * bs + np.arange(bs)[None, :])[:, None, :] \
+        + (mv[..., 0] >> 1)[:, :, None]
+    xs = (np.arange(nbx)[:, None] * bs + np.arange(bs)[None, :])[None, :, :] \
+        + (mv[..., 1] >> 1)[:, :, None]
+    np.clip(ys, 0, h - 1, out=ys)
+    np.clip(xs, 0, w - 1, out=xs)
+    got = planes[phase[:, :, None, None], ys[:, :, :, None], xs[:, :, None, :]]
+
+    pad = np.zeros((nby * bs, nbx * bs), dtype=cur.dtype)
     pad[:h, :w] = cur
     blocks = pad.reshape(nby, bs, nbx, bs).transpose(0, 2, 1, 3)
-    out = np.zeros((nby, nbx), dtype=np.int64)
-    for p in range(4):
-        sel = phase == p
-        if not sel.any():
-            continue
-        got = _gather_blocks(planes[p], whole, bs, h, w)
-        cost = _residual_cost(blocks, got).sum(axis=(2, 3))
-        out = np.where(sel, cost, out)
-    return out
+    return _residual_cost(blocks, got).sum(axis=(2, 3)).astype(np.int64)
+
+
+def _halve(p):
+    """Box-average down by two, replicating an odd last row or column."""
+    if p.shape[0] & 1:
+        p = np.concatenate([p, p[-1:]], axis=0)
+    if p.shape[1] & 1:
+        p = np.concatenate([p, p[:, -1:]], axis=1)
+    a = p.astype(np.uint16)
+    return (((a[0::2, 0::2] + a[0::2, 1::2] + a[1::2, 0::2] + a[1::2, 1::2] + 2)
+             >> 2).astype(np.uint8))
+
+
+def _full_search(cur, ref, bs, radius, nby, nbx):
+    """Exhaustive whole-pixel search, scored by one strided view per position.
+
+    Padding the reference once and slicing it beats re-deriving clipped index
+    arrays for every position, and a slice is a view rather than a copy.
+    """
+    pad = np.pad(ref, radius, mode="edge")
+    h, w = cur.shape
+    best = None
+    mv = np.zeros((nby, nbx, 2), dtype=np.int32)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            view = pad[radius + dy:radius + dy + h, radius + dx:radius + dx + w]
+            sums = _block_sums(_residual_cost(cur, view), nby, nbx, bs)
+            if best is None:
+                best = sums
+                continue
+            better = sums < best
+            best = np.where(better, sums, best)
+            mv[..., 0] = np.where(better, dy, mv[..., 0])
+            mv[..., 1] = np.where(better, dx, mv[..., 1])
+    return mv, best
+
+
+def _refine_whole(cur, ref, mv, bs, radius=REFINE_RADIUS):
+    """Try the whole-pixel neighbourhood of each block's own current vector."""
+    h, w = cur.shape
+    best = _block_cost_whole(cur, ref, mv, bs)
+    centre = mv.copy()          # fixed, so candidates cannot walk off the centre
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy == 0 and dx == 0:
+                continue
+            cand = centre + np.array([dy, dx], dtype=np.int32)
+            cost = _block_cost_whole(cur, ref, cand, bs)
+            better = cost < best
+            best = np.where(better, cost, best)
+            mv[..., 0] = np.where(better, cand[..., 0], mv[..., 0])
+            mv[..., 1] = np.where(better, cand[..., 1], mv[..., 1])
+    return mv, best
+
+
+def _block_cost_whole(cur, ref, mv, bs):
+    h, w = cur.shape
+    nby, nbx = mv.shape[0], mv.shape[1]
+    pad = np.zeros((nby * bs, nbx * bs), dtype=cur.dtype)
+    pad[:h, :w] = cur
+    blocks = pad.reshape(nby, bs, nbx, bs).transpose(0, 2, 1, 3)
+    got = _gather_blocks(ref, mv, bs, h, w)
+    return _residual_cost(blocks, got).sum(axis=(2, 3)).astype(np.int64)
 
 
 def motion_search(cur, ref, bs=None, search=None):
     """Per-block best vector and cost, in half-pel units.
 
-    Two stages, because a full search over every half-pel position would cost
-    four times what the whole-pixel one does and the encoder is already bound
-    by this. Stage one is the same exhaustive whole-pixel search as before;
-    stage two tries the eight half-pel neighbours of whatever it found. That is
-    the standard arrangement and it recovers nearly all of the available gain -
-    sub-pixel motion is a refinement of the right whole-pixel match, not a
-    different match somewhere else.
+    Coarse to fine. An exhaustive whole-pixel search at full resolution costs
+    (2*search+1)^2 passes over the frame, which at 1080p was 85% of encode
+    time. Instead the search runs on a quarter-size pyramid, where the same
+    displacement range needs a quarter of the radius and a sixteenth of the
+    pixels, and each finer level only has to correct the doubling by +-1.
+
+    The final stage tries the eight half-pel neighbours. Sub-pixel motion is a
+    refinement of the right whole-pixel match rather than a different match
+    somewhere else, so a full half-pel search would cost four times as much to
+    find nearly the same vectors.
     """
     bs = BLOCK if bs is None else bs
     search = SEARCH if search is None else search
@@ -149,21 +245,33 @@ def motion_search(cur, ref, bs=None, search=None):
     nby, nbx = -(-h // bs), -(-w // bs)
     planes = halfpel_planes(ref)
 
-    best = None
-    bmv = np.zeros((nby, nbx, 2), dtype=np.int32)
-    for dy in range(-search, search + 1):
-        for dx in range(-search, search + 1):
-            sums = _block_sums(_residual_cost(cur, _shifted(ref, dy, dx)), nby, nbx, bs)
-            if best is None:
-                best = sums
-                continue
-            better = sums < best
-            best = np.where(better, sums, best)
-            bmv[..., 0] = np.where(better, dy, bmv[..., 0])
-            bmv[..., 1] = np.where(better, dx, bmv[..., 1])
+    # Halve until an exhaustive search is affordable, but only as deep as the
+    # block size and search radius survive.
+    levels = 0
+    while (levels < PYRAMID_LEVELS
+           and (h * w) >> (2 * levels) > PYRAMID_MIN_PIXELS
+           and (bs >> (levels + 1)) >= 4
+           and (search >> (levels + 1)) >= 1
+           and min(h, w) >> (levels + 1) >= bs):
+        levels += 1
 
+    curs, refs = [cur], [ref]
+    for _ in range(levels):
+        curs.append(_halve(curs[-1]))
+        refs.append(_halve(refs[-1]))
+
+    radius = -(-search >> levels)               # ceil, so coverage never shrinks
+    bmv, best = _full_search(curs[levels], refs[levels], bs >> levels,
+                             radius, nby, nbx)
+    for level in range(levels - 1, -1, -1):
+        bmv = bmv * 2
+        bmv, best = _refine_whole(curs[level], refs[level], bmv, bs >> level)
+
+    np.clip(bmv, -search, search, out=bmv)
     bmv *= 2                                    # whole pixels -> half-pel units
+    best = _block_cost_at(cur, planes, bmv, bs)
     best = best.astype(np.int64)
+    centre = bmv.copy()         # fixed, as above
     # A half-pel vector costs more to send than the whole-pel one it refines:
     # the magnitudes are coded in half-pel units, so an odd component roughly
     # doubles the unary run. Requiring the refinement to beat the whole-pel
@@ -173,7 +281,16 @@ def motion_search(cur, ref, bs=None, search=None):
         for sx in (-1, 0, 1):
             if sy == 0 and sx == 0:
                 continue
-            cand = bmv + np.array([sy, sx], dtype=np.int32)
+            # Clamped to +-search whole pixels, expressed in half-pels. Every
+            # vector and every median of vectors then lives in that range, so a
+            # differential cannot exceed 4*search = MV_MAX. Without this the
+            # half-pel step can reach +-(2*search+1), a differential can reach
+            # 4*search+2, and the encoder writes a longer unary run than the
+            # decoder reads back - a desync that silently corrupts the stream
+            # rather than failing. Rare enough that the test suite never hit it,
+            # which is exactly why it is pinned by a test now.
+            cand = np.clip(centre + np.array([sy, sx], dtype=np.int32),
+                           -2 * search, 2 * search)
             cost = _block_cost_at(cur, planes, cand, bs)
             better = cost + HALF_PEL_BIAS < best
             best = np.where(better, cost, best)
@@ -339,8 +456,11 @@ def _encode_payload_fast(frames, block, luma_h, luma_w, progress):
                 ph, pw = pl.shape
                 sy = max(1, luma_h // ph)
                 sx = max(1, luma_w // pw)
+                # uint8, not int64: at 1080p the four phases of a luma plane
+                # are 66 MB widened and 8 MB as bytes, and the kernel reads
+                # them at random offsets where cache behaviour is what matters.
                 phases = np.ascontiguousarray(
-                    halfpel_planes(prev[i].astype(np.uint8)), dtype=np.int64)
+                    halfpel_planes(prev[i].astype(np.uint8)), dtype=np.uint8)
                 bank.code(coder, True, pl, min(i, 3), 1 if i in (1, 2) else 0,
                           1 if i == 0 else 0, errmap, flat,
                           inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, phases))
@@ -376,8 +496,11 @@ def _decode_payload_fast(payload, shapes, nframes, block, progress):
                 ph, pw = pl.shape
                 sy = max(1, luma_h // ph)
                 sx = max(1, luma_w // pw)
+                # uint8, not int64: at 1080p the four phases of a luma plane
+                # are 66 MB widened and 8 MB as bytes, and the kernel reads
+                # them at random offsets where cache behaviour is what matters.
                 phases = np.ascontiguousarray(
-                    halfpel_planes(prev[i].astype(np.uint8)), dtype=np.int64)
+                    halfpel_planes(prev[i].astype(np.uint8)), dtype=np.uint8)
                 bank.code(coder, False, pl, min(i, 3), 1 if i in (1, 2) else 0,
                           1 if i == 0 else 0, errmap, flat,
                           inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, phases))

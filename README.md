@@ -70,7 +70,7 @@ error 55 — which is why nothing here is trusted on its label.)
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| **hve** | **317,074** | **7.67x** | lossless |
+| **hve** | **316,313** | **7.69x** | lossless |
 | x264 lossless (veryslow) | 321,053 | 7.58x | lossless |
 | x265 lossless (veryslow) | 323,443 | 7.52x | lossless |
 | AV1 lossless (libaom) | 329,528 | 7.38x | lossless |
@@ -87,14 +87,14 @@ High-motion content used to be where this lost. Same 16-frame test on
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| **hve** | **837,709** | **2.90x** | lossless |
+| **hve** | **834,879** | **2.91x** | lossless |
 | x264 lossless | 846,081 | 2.88x | lossless |
 | AV1 lossless | 851,838 | 2.86x | lossless |
 | x265 lossless | 852,986 | 2.85x | lossless |
 | VP9 lossless | 886,928 | 2.74x | lossless |
 | FFV1 level 3 | 971,089 | 2.51x | lossless |
 
-Now first here too, 1.0% ahead of x264. This was 883,078 and fourth two changes
+Now first here too, 1.3% ahead of x264. This was 883,078 and fourth two changes
 ago. Half of the move came from the learned combiner, which was built for still
 images and never tuned on video; the rest came from **half-pel motion vectors**,
 which is the one thing this README previously named as the missing ingredient.
@@ -113,6 +113,28 @@ alongside the other rejected idea from this round.
 
 The inter design is still deliberately simple: one reference frame, one block
 size, no bidirectional prediction.
+
+### Video — 16 frames of 1080p (`sintel_trailer_2k`, 49,766,400 raw bytes)
+
+CIF clips say nothing about how any of this scales, so here is the same test at
+1920x1080. This part of the trailer is nearly static, which is why every ratio
+is enormous; treat the ordering as the result and the absolute numbers as a
+property of the content.
+
+| codec | bytes | ratio | enc s | verified |
+|---|---:|---:|---:|---|
+| **hve** | **30,966** | **1607x** | 19.8 | lossless |
+| x264 lossless | 34,607 | 1438x | 0.4 | lossless |
+| AV1 lossless | 43,372 | 1147x | 2.7 | lossless |
+| x265 lossless | 46,281 | 1075x | 2.2 | lossless |
+| VP9 lossless | 50,265 | 990x | 1.4 | lossless |
+| FFV1 level 3 | 521,316 | 95x | 0.4 | lossless |
+
+10.5% smaller than x264 and 29% smaller than AV1 — **and roughly 50x slower to
+encode**. Encoding was 145s before the motion search was rewritten and is 19.8s
+now, but that is a different scale of answer from x264's 0.4s, and no amount of
+tuning inside numpy and numba closes it. `docs/research.md` records what the
+remaining time is spent on and what closing it would actually take.
 
 Reproduce with `python tools/bench_image.py test` and
 `python tools/bench_video.py testdata/video/akiyo_cif.y4m 16`. Every baseline is

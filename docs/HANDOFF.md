@@ -5,7 +5,7 @@ then whichever of the three documents below matches what you are about to do.
 Update this file when the state it describes stops being true; a stale handoff
 is worse than none.
 
-**Last verified: half-pel motion vectors, all 39 tests green, benchmarks in
+**Last verified: the motion-search rewrite, all 42 tests green, benchmarks in
 `results/` regenerated against it.**
 
 ## What this is
@@ -46,8 +46,12 @@ Held-out split, 18 Kodak images never used for tuning
 
 31.9% under PNG, 4.8% under lossless WebP, **7.0% over JPEG XL**, and faster
 than both of them. Video now leads x264, x265, AV1 and VP9 on **both** test
-clips — akiyo 317,074 and foreman 837,709, the latter 1.0% ahead of x264. See
-the README tables.
+clips — akiyo 316,313 and foreman 834,879, the latter 1.3% ahead of x264 — and
+on 16 frames of 1080p Sintel it is 10.5% under x264. See the README tables.
+
+Video encode is **~50x slower than x264** (19.8s against 0.4s for 16 frames of
+1080p). That is after a 7.4x speedup; the remainder is not reachable from
+numpy and numba. See "Where video encode time goes" in `docs/research.md`.
 
 Treat `cpu s` as approximate — a repeat run moved JPEG XL e9 from 63.9s to 77.9s
 on identical code. Byte counts are exact.
@@ -175,10 +179,17 @@ order of expected value:
   several were fitted on 1-3 images back when a full-corpus A/B cost 13 minutes;
   it now costs ~3s, so `tools/tune.py` can run properly on the whole dev set.
   The combiner's own constants were swept, but only one axis at a time.
+- **Diagnose the match model's 7.3% loss on 1080p Sintel.** It is the largest
+  known single loss in the codec: disabling the model entirely makes that clip
+  28,725 bytes instead of 30,966, while the same model saves 1.25% on the CIF
+  pair. Two hypotheses were tested and both were wrong (see `docs/research.md`).
+  Diagnose it before changing anything.
 - **Multiple reference frames or bidirectional prediction** for video, neither
-  of which has been costed. Half-pel vectors are done (-2.3% held out) and
-  variable block sizes were measured and rejected, so the two items this section
-  used to name are closed. Video encode is still bounded by motion search.
+  of which has been costed. Half-pel vectors are done and variable block sizes
+  were measured and rejected.
+- **Video encode speed beyond 7.4x** needs a C implementation and threads, which
+  needs the slice-independent format change. Search and coding are now about
+  even, so neither alone is the answer.
 
 ## Honest framing
 

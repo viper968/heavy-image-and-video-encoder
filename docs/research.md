@@ -47,6 +47,11 @@ Weighing of Context Models*, the ZPAQ specification, and the FLIF/MANIAC ICIP
 | Larger motion search, ±12 / ±16 / ±24 (video) | bus clips at ±8 | **+0.01 to +0.04% worse** | rejected |
 | Third block mode: spatial prediction of the MC residual (video) | 10%+ from the frame proxy | **-0.2 to -0.8%** per block | rejected |
 | Variable block size, 16x16 split into four 8x8 (video) | sharper motion edges | **+1.2% to +22.5% worse** | rejected |
+| **Coarse-to-fine motion search** (video) | speed only | **7.4x faster encode at 1080p**, size within 0.01% | kept |
+| Pyramid search forced on at CIF | — | **+1.26% worse** on foreman | gated on frame size |
+| Skipping the learned combiner on inter blocks | speed only | faster **and -0.21%** | kept |
+| Suppressing the match override on inter blocks | 7.9% on Sintel | **-0.12%** | kept |
+| Gating the match model on a non-flat neighbourhood | the Sintel loss | **+0.05 to +0.19% worse** | rejected |
 
 ### The three that failed are the informative ones
 
@@ -193,6 +198,81 @@ with the earlier finding that 8x8 blocks alone were slightly worse, and
 strengthens it: it is not that 8x8 is the wrong size, it is that subdividing
 does not pay at this bitrate. Lossless video spends so much on residuals that
 motion side-information is nearly free to *omit* and expensive to add.
+
+## Where video encode time goes, and what a 7x speedup did not fix
+
+At 1080p the encoder took 145s for 16 frames against x264's 0.4s. Profiling put
+**85% of that in motion search** — 289 whole-pixel positions, each a full-frame
+pass. Three changes took encode to 19.8s, a 7.4x speedup, with output within
+0.01% of the same size:
+
+| change | search time | why |
+|---|---:|---|
+| baseline | 122.9s | 289 full-frame passes per frame |
+| cost as a 256-entry byte LUT | — | `(a-b) & 255` indexes a table with the fold baked in, replacing a widen, subtract, abs, minimum and gather. Was 51% of search. |
+| padded slicing instead of clipped fancy indexing | — | a strided view rather than a gather; was 25% |
+| coarse-to-fine pyramid | **10.9s** | search a quarter-size frame, refine +-1 down two levels |
+| one gather instead of four in the half-pel stage | **8.6s** | index the phase as part of the gather rather than fetching all four planes and discarding three |
+
+Two things about the pyramid are worth keeping.
+
+**It has to be gated on frame size.** Forcing it on at CIF cost **1.26% on
+foreman**: box-downsampling a 352x288 frame twice destroys the detail that
+separates candidate vectors, and refinement cannot recover a match the coarse
+level never pointed at. Below 300k pixels an exhaustive search is affordable
+anyway, so the codec just does one. Speed work that quietly costs compression on
+small inputs is not a speedup, it is a trade, and this one did not need to be.
+
+**Refining against a moving centre was a bug.** The refinement updated the
+vector in place, so the second candidate was an offset from wherever the first
+had already moved it. Fixing it to evaluate all neighbours against a fixed
+centre was both slightly *better* compression and, more importantly, bounded:
+the drift is what let a vector reach +-(2*SEARCH+2).
+
+### A latent desync, found by trying to bound that drift
+
+Motion vectors are coded as a differential against the median of three
+neighbours, with a unary magnitude that saturates at `MV_MAX`. If a differential
+exceeds it, the encoder writes a longer run of ones than the decoder will read
+back, and **the stream desyncs from that point with nothing reporting an error**.
+Half-pel vectors made this reachable: the refinement could push a vector to
++-(2*SEARCH+1), two neighbours moving hard in opposite directions then give a
+differential of 4*SEARCH+2, and `MV_MAX` is 4*SEARCH.
+
+Both foreman and bus produce vectors at +-17 against a limit of 16, so this was
+live, not theoretical. Vectors are now clamped to +-2*SEARCH, which bounds any
+differential — including one against a median of neighbours — to exactly
+`MV_MAX`. Synthetic content did not reproduce it, so the regression test uses
+the real clips and asserts the bound directly.
+
+### What is left, and why 50x is not closable here
+
+Encode splits about evenly now: 8.6s of search and 11s of coding. The coding
+loop is already compiled, runs at roughly 200ns per sample across 50M samples,
+and is inherently serial — every pixel depends on all prior ones, so there is no
+parallelism to find without changing the format. Getting from 19.8s to anything
+near x264's 0.4s needs a C implementation and multiple threads, which means the
+slice-independent format change described under "What would actually close the
+gap". Nothing inside numpy and numba gets there.
+
+One real waste was found and removed: the learned combiner was computing
+thirteen multiply-accumulates, a division and thirteen weight updates for every
+pixel of an inter block, where `pred` is then overwritten by the reference
+sample. Skipping it there was faster **and 0.21% smaller** on the held-out
+clips, because the confidence context had been feeding the mixer spatial
+information that is misleading on a temporally predicted pixel.
+
+### An open finding: the match model costs 7.3% on 1080p Sintel
+
+Disabling the match model entirely makes that clip **28,725 bytes instead of
+30,966**, while the same model *saves* 1.25% on the held-out CIF pair. Two
+hypotheses were tested and both were wrong: suppressing only its override of the
+temporal prediction recovered 0.12% (kept anyway — it is principled and helps
+everywhere), and gating it on a non-flat neighbourhood made every set worse
+(stills +0.05%, video +0.19%). Whatever is actually happening on near-static
+high-resolution content has not been identified, and guessing further without a
+diagnosis was not worth more time. It is the largest single known loss in the
+codec right now.
 
 ## The match model: the one that needed a different combiner
 

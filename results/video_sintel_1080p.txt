@@ -1,0 +1,24 @@
+sintel_trailer_2k_1080p24.y4m: 16 frames of 1920x1080, 49766400 raw bytes
+
+hve done (19.8s enc, 8.6s dec)
+FFV1 (level 3) done
+x264 lossless done
+x265 lossless done
+VP9 lossless done
+AV1 lossless done
+FFVHuff done
+Ut Video done
+
+baselines: ffmpeg version 6.1.6 Copyright (c) 2000-2026 the FFmpeg developers
+
+codec                     bytes      ratio     enc s     dec s  verified
+hve                       30966   1607.13x      19.8       8.6  lossless
+x264 lossless             34607   1438.04x       0.4         -  lossless
+AV1 lossless              43372   1147.43x       2.7         -  lossless
+x265 lossless             46281   1075.31x       2.2         -  lossless
+VP9 lossless              50265    990.08x       1.4         -  lossless
+FFV1 (level 3)           521316     95.46x       0.4         -  lossless
+Ut Video                4559701     10.91x       0.1         -  lossless
+FFVHuff                12446244      4.00x       0.1         -  lossless
+
+Note: container overhead (mkv) is included in the ffmpeg numbers.

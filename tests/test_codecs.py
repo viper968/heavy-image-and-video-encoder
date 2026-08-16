@@ -427,3 +427,60 @@ def test_cli_image_roundtrip(tmp_path):
     cli.main(["encode", src, mid])
     cli.main(["decode", mid, out])
     assert np.array_equal(np.array(PILImage.open(out)), img)
+
+
+def test_mv_coding_survives_the_largest_differential():
+    """Motion vectors are coded as a differential with a unary magnitude that
+    saturates at MV_MAX. If a differential can exceed that, the encoder writes a
+    longer run of ones than the decoder will read back and the stream desyncs
+    from that point on - silently, since nothing checks. The encoder therefore
+    clamps vectors to +-2*SEARCH, which bounds any differential (including one
+    against a median of neighbours) to exactly MV_MAX. This pins that arithmetic.
+    """
+    limit = 2 * video.SEARCH
+    nby = nbx = 3
+    modes = np.ones((nby, nbx), dtype=np.int32)
+    mvs = np.zeros((nby, nbx, 2), dtype=np.int32)
+    for by in range(nby):                     # alternate extremes -> maximal deltas
+        for bx in range(nbx):
+            sign = 1 if (by + bx) % 2 == 0 else -1
+            mvs[by, bx] = (sign * limit, -sign * limit)
+
+    enc = rc.Encoder()
+    video.code_block_info(enc, True, video.new_video_model(), nby, nbx,
+                          modes.tolist(), mvs.tolist())
+    dec = rc.Decoder(enc.finish())
+    _, got = video.code_block_info(dec, False, video.new_video_model(), nby, nbx)
+    assert np.array_equal(np.array(got), mvs)
+
+
+CLIPS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "testdata", "video")
+
+
+@pytest.mark.parametrize("clip", ["foreman_cif.y4m", "bus_cif.y4m"])
+def test_search_keeps_vectors_codeable_on_real_clips(clip):
+    """The same bound, against content that actually reaches it.
+
+    Both of these produce vectors at the search limit with genuine sub-pixel
+    motion, which is the combination that used to push a vector to +-(2*SEARCH+1)
+    and put the differential out of range. Synthetic content did not reproduce
+    it; these do.
+    """
+    path = os.path.join(CLIPS, clip)
+    if not os.path.exists(path):
+        pytest.skip("run tools/fetch_testdata.py for %s" % clip)
+    reader = y4m.Y4M(path)
+    frames = [[p.copy() for p in f] for f in reader.frames(limit=6)]
+    reader.close()
+    limit = 2 * video.SEARCH
+    for i in range(1, len(frames)):
+        _, mvs = video.choose_modes(frames[i][0], frames[i - 1][0])
+        assert np.abs(mvs).max() <= limit
+        nbx = mvs.shape[1]
+        listed = mvs.tolist()
+        for by in range(mvs.shape[0]):
+            for bx in range(nbx):
+                py, px = video.mv_predictor(listed, by, bx, nbx)
+                assert abs(int(mvs[by][bx][0]) - py) <= video.MV_MAX
+                assert abs(int(mvs[by][bx][1]) - px) <= video.MV_MAX

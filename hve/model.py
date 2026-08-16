@@ -430,78 +430,91 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                             blend = hi
                     pred = 255 if blend > 255 else (0 if blend < 0 else blend)
 
-                    # The second ring, clamped back onto the first at the edges
-                    # of the plane so both paths agree on what is unavailable.
-                    # Names extend the existing convention, so `nnwest` is two
-                    # rows up and one column left while `nwwest` is one row up
-                    # and two columns left - different pixels, similar names.
-                    wwest = cur[x - 2] if x >= 2 else west
-                    wwwest = cur[x - 3] if x >= 3 else wwest
-                    nwwest = prev[x - 2] if x >= 2 else nwest
-                    neeast = prev[x + 2] if x + 2 < width else neast
-                    if y >= 2:
-                        nnorth = prev2[x]
-                        nnwest = prev2[x - 1]
-                        nneast = prev2[x + 1] if x + 1 < width else nnorth
-                    else:
-                        nnorth = north
-                        nnwest = nwest
-                        nneast = neast
+                    # Skip the learned combiner where its answer is thrown
+                    # away. A temporally predicted pixel overwrites `pred`
+                    # with the reference sample a few lines below, so on an
+                    # inter block all of this - thirteen multiply-accumulates,
+                    # a division and thirteen weight updates - is computed and
+                    # then discarded. Most pixels in a video are inter, and at
+                    # 1080p this was a third of the coding time.
+                    #
+                    # `lms_on`, `energy` and `lms_adj` keep their per-pixel
+                    # defaults when this is skipped, so the confidence context
+                    # sees a consistent 'no combiner ran here' state on both
+                    # sides rather than a stale one.
+                    if inter is None or not mode_x[x]:
+                        # The second ring, clamped back onto the first at the edges
+                        # of the plane so both paths agree on what is unavailable.
+                        # Names extend the existing convention, so `nnwest` is two
+                        # rows up and one column left while `nwwest` is one row up
+                        # and two columns left - different pixels, similar names.
+                        wwest = cur[x - 2] if x >= 2 else west
+                        wwwest = cur[x - 3] if x >= 3 else wwest
+                        nwwest = prev[x - 2] if x >= 2 else nwest
+                        neeast = prev[x + 2] if x + 2 < width else neast
+                        if y >= 2:
+                            nnorth = prev2[x]
+                            nnwest = prev2[x - 1]
+                            nneast = prev2[x + 1] if x + 1 < width else nnorth
+                        else:
+                            nnorth = north
+                            nnwest = nwest
+                            nneast = neast
 
-                    # GAP, CALIC's gradient-adjusted prediction. It earns a slot
-                    # because it is *nonlinear* - it switches on the ratio of
-                    # horizontal to vertical gradient - so unlike another
-                    # weighted sum of neighbours it is not already inside the
-                    # combiner's span.
-                    dh = (abs(west - wwest) + abs(north - nwest)
-                          + abs(north - neast))
-                    dv = (abs(west - nwest) + abs(north - nnorth)
-                          + abs(neast - nneast))
-                    dd = dv - dh
-                    if dd > 80:
-                        gap = west
-                    elif dd < -80:
-                        gap = north
-                    else:
-                        gap = (west + north) // 2 + (neast - nwest) // 4
-                        if dd > 32:
-                            gap = (gap + west) // 2
-                        elif dd > 8:
-                            gap = (3 * gap + west) // 4
-                        elif dd < -32:
-                            gap = (gap + north) // 2
-                        elif dd < -8:
-                            gap = (3 * gap + north) // 4
+                        # GAP, CALIC's gradient-adjusted prediction. It earns a slot
+                        # because it is *nonlinear* - it switches on the ratio of
+                        # horizontal to vertical gradient - so unlike another
+                        # weighted sum of neighbours it is not already inside the
+                        # combiner's span.
+                        dh = (abs(west - wwest) + abs(north - nwest)
+                              + abs(north - neast))
+                        dv = (abs(west - nwest) + abs(north - nnorth)
+                              + abs(neast - nneast))
+                        dd = dv - dh
+                        if dd > 80:
+                            gap = west
+                        elif dd < -80:
+                            gap = north
+                        else:
+                            gap = (west + north) // 2 + (neast - nwest) // 4
+                            if dd > 32:
+                                gap = (gap + west) // 2
+                            elif dd > 8:
+                                gap = (3 * gap + west) // 4
+                            elif dd < -32:
+                                gap = (gap + north) // 2
+                            elif dd < -8:
+                                gap = (3 * gap + north) // 4
 
-                    # The second ring first, then the two nonlinear predictors.
-                    lms_x[0] = west - pred
-                    lms_x[1] = north - pred
-                    lms_x[2] = nwest - pred
-                    lms_x[3] = neast - pred
-                    lms_x[4] = wwest - pred
-                    lms_x[5] = nnorth - pred
-                    lms_x[6] = nnwest - pred
-                    lms_x[7] = nneast - pred
-                    lms_x[8] = q3 - pred
-                    lms_x[9] = gap - pred
-                    lms_x[10] = wwwest - pred
-                    lms_x[11] = nwwest - pred
-                    lms_x[12] = neeast - pred
-                    lms_base_w = kind_lms + (
-                        (act_b >> LMS_ACT_SHIFT) * LMS_NDIR
-                        + (0 if dd < -32 else (1 if dd <= 0 else
-                            (2 if dd <= 32 else 3)))) * LMS_NPRED
-                    acc = 0
-                    energy = LMS_EPS
-                    for i in range(LMS_NPRED):
-                        xi = lms_x[i]
-                        acc += lms_w[lms_base_w + i] * xi
-                        energy += xi * xi
-                    lms_adj = acc >> LMS_WSHIFT
-                    adj = pred + lms_adj
-                    pred = 255 if adj > 255 else (0 if adj < 0 else adj)
-                    lms_pred = pred
-                    lms_on = True
+                        # The second ring first, then the two nonlinear predictors.
+                        lms_x[0] = west - pred
+                        lms_x[1] = north - pred
+                        lms_x[2] = nwest - pred
+                        lms_x[3] = neast - pred
+                        lms_x[4] = wwest - pred
+                        lms_x[5] = nnorth - pred
+                        lms_x[6] = nnwest - pred
+                        lms_x[7] = nneast - pred
+                        lms_x[8] = q3 - pred
+                        lms_x[9] = gap - pred
+                        lms_x[10] = wwwest - pred
+                        lms_x[11] = nwwest - pred
+                        lms_x[12] = neeast - pred
+                        lms_base_w = kind_lms + (
+                            (act_b >> LMS_ACT_SHIFT) * LMS_NDIR
+                            + (0 if dd < -32 else (1 if dd <= 0 else
+                                (2 if dd <= 32 else 3)))) * LMS_NPRED
+                        acc = 0
+                        energy = LMS_EPS
+                        for i in range(LMS_NPRED):
+                            xi = lms_x[i]
+                            acc += lms_w[lms_base_w + i] * xi
+                            energy += xi * xi
+                        lms_adj = acc >> LMS_WSHIFT
+                        adj = pred + lms_adj
+                        pred = 255 if adj > 255 else (0 if adj < 0 else adj)
+                        lms_pred = pred
+                        lms_on = True
 
             if not first_row and x:
                 # Match model: where did this exact neighbourhood last occur?
@@ -551,7 +564,17 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 agree = 0 if mval == pred else (1 if -3 < mval - pred < 3 else 2)
                 hit = match_len if match_len < MATCH_MAX_LEN else MATCH_MAX_LEN
                 match_ctx = kind_match + 1 + hit * 3 + agree
-                if match_len >= MATCH_TRUST:
+                # ...but never over a temporally predicted block. The match
+                # model detects *spatial* repetition; on an inter block it was
+                # overwriting a motion-compensated prediction that is usually
+                # already exact. In flat or near-static content its hash matches
+                # everywhere, so it trivially earns sustained agreement and then
+                # replaces a perfect prediction with a worse one - measured at
+                # 7.9% on 16 frames of 1080p Sintel. Suppressing only the
+                # override keeps its contexts and its sign and magnitude
+                # experts, which is where its value on intra blocks comes from.
+                if match_len >= MATCH_TRUST and not (inter is not None
+                                                     and mode_x[x]):
                     pred = mval
                 mexp = mval - pred
                 msign = 1 if mexp < 0 else (2 if mexp == 0 else 3)
