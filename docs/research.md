@@ -42,6 +42,11 @@ Weighing of Context Models*, the ZPAQ specification, and the FLIF/MANIAC ICIP
 | Combiner confidence as a 3rd length-bin expert | — | **-0.18%** | kept |
 | Combiner weight sets on 16 activity buckets vs 8 | finer is better | **+0.06% worse** | 8 kept |
 | Combiner weight sets split 4 ways on gradient direction | — | **-0.37%** | kept |
+| **Half-pel motion vectors** (video) | 5-8% from the proxy | **-3.7%** dev, **-2.3%** held-out | kept |
+| Median MV predictor from left/above/above-right (video) | 1-2% | **-0.012%** | kept, but see below |
+| Larger motion search, ±12 / ±16 / ±24 (video) | bus clips at ±8 | **+0.01 to +0.04% worse** | rejected |
+| Third block mode: spatial prediction of the MC residual (video) | 10%+ from the frame proxy | **-0.2 to -0.8%** per block | rejected |
+| Variable block size, 16x16 split into four 8x8 (video) | sharper motion edges | **+1.2% to +22.5% worse** | rejected |
 
 ### The three that failed are the informative ones
 
@@ -127,6 +132,67 @@ decides which predictors deserve weight — and that was worth a further 0.37%.
 Dev improved 1.95% against 1.10% held out. The constants (step size, energy
 floor, bucket counts) were swept on dev, so some of that spread is fitting; the
 held-out number is the one to quote.
+
+## Motion modelling: one of four ideas worked
+
+The README used to name "sub-pixel motion and variable block sizes" as what
+video was missing. Half of that was right.
+
+Four things were tried, and the useful part of this section is the order they
+were tried in, because three of them were **costed with a numpy proxy before
+being built** and two of those were abandoned on the strength of the estimate
+alone. The proxy is `_COST`, the same log-ish bit-cost the encoder already uses
+to pick block modes, summed over residuals. It is not the real coder — it knows
+nothing about context modelling — but it is fast enough to answer "is there
+anything here at all" in about a minute per idea.
+
+**Half-pel vectors: -3.7% dev, -2.3% held out.** Kept. The proxy said 5.3% on
+bus, 7.9% on mobile, 6.7% on foreman and roughly nothing on the near-static
+clips, which is exactly the shape a real sub-pixel effect should have. The
+delivered number is smaller than the proxy, as always, because the context model
+was already recovering some of it. On foreman this alone was 3.05%, which is
+what moved that clip from fourth place to first.
+
+The reference is bilinearly interpolated to four phases and the vector's low bit
+picks one, so the inner loop stays a single array index. Search is two-stage —
+exhaustive whole-pixel, then the eight neighbouring half-pel positions — which
+costs 15% more encode time rather than the 4x a full half-pel search would.
+A half-pel refinement also has to *beat* the whole-pixel match by a margin
+rather than tie it, because an odd vector component roughly doubles the unary
+run that codes it; without that margin the near-static clips paid 0.2% for
+precision they had no use for.
+
+**Larger search range: rejected, and the reason is worth keeping.** 19.2% of
+bus's temporal blocks sit pinned at the ±8 search limit, which looks like a
+clear diagnosis. Widening to ±12, ±16 and ±24 made the file *slightly worse*
+every time. The search was never the constraint: it finds those vectors, but a
+wider range also means longer vectors to code, and the mode decision charges a
+flat penalty that does not price them. A saturating histogram is evidence of a
+limit being hit, not evidence that the limit is what costs you.
+
+**Median MV predictor: -0.012%.** Kept, because it is strictly better and free,
+but the number is the finding. Predicting each vector from the median of its
+left, above and above-right neighbours instead of from the left alone is
+textbook H.264 and it bought almost nothing — which says motion vectors are a
+negligible share of a *lossless* file. That single measurement is why the
+rate-aware search that would normally follow was not built: there is no prize.
+
+**Spatial prediction of the motion-compensated residual: rejected.** This looked
+like the big one. Measured per frame, coding `cur - ref_mc` with MED prediction
+on top beats coding it flat by 13.7% on bus and 9.9% on foreman. But measured
+*per block*, letting each 16x16 block pick the cheaper of the two, the gain
+collapses to between 0.2% and 0.8% — because the existing per-block choice
+between spatial and temporal already captures nearly all of it, and the third
+mode wins outright on only 1-13% of blocks. A frame-level average hid a decision
+the codec was already making. Not worth a third block mode and its signalling.
+
+**Variable block size: rejected, decisively.** Splitting each 16x16 into four
+8x8 vectors scored worse on every clip — 1.2% on bus, 22.5% on akiyo — with the
+extra vectors costing more than the sharper motion boundaries save. This agrees
+with the earlier finding that 8x8 blocks alone were slightly worse, and
+strengthens it: it is not that 8x8 is the wrong size, it is that subdividing
+does not pay at this bitrate. Lossless video spends so much on residuals that
+motion side-information is nearly free to *omit* and expensive to add.
 
 ## The match model: the one that needed a different combiner
 
@@ -268,8 +334,11 @@ The plausible next steps, none of them costed yet:
   both smooth and busy regions. Two rates would need a combiner of their own,
   and on the evidence in this document that should be a mixer or a switch, not
   an average.
-- **Sub-pixel motion and variable block sizes** for video, where the remaining
-  loss on high-motion content actually lives.
+- ~~Sub-pixel motion and variable block sizes for video~~ — **half done**.
+  Half-pel vectors are in and worth 2.3% held out; variable block sizes were
+  measured and rejected. See "Motion modelling" above. What video still does
+  not do is multiple reference frames or bidirectional prediction, and neither
+  has been costed.
 
 ## Where the bits actually go
 

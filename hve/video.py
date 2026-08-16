@@ -16,12 +16,22 @@ from .transform import predict_plane, rct_forward, rct_inverse
 MAGIC = b"HVV1"
 FLAG_RCT = 1
 BLOCK = 16
-SEARCH = 8
+SEARCH = 8              # full-pel search radius, in whole pixels
 
 MODE_SPATIAL = 0
 MODE_TEMPORAL = model.MODE_TEMPORAL
 
-MV_MAX = 2 * SEARCH
+# Motion vectors are in HALF-pixel units, so the usable displacement is still
+# +-SEARCH whole pixels and a differential can reach twice that in half-pels.
+#
+# Real motion does not land on the pixel grid, and rounding it there leaves a
+# residual that no amount of context modelling recovers. Measured against the
+# codec's own cost proxy before building it, half-pel is worth -5.3% on bus,
+# -7.9% on mobile and -6.7% on foreman, and roughly nothing on the near-static
+# clips - which is the right shape, because those have no sub-pixel motion to
+# capture. The two rejected alternatives are recorded in docs/research.md.
+MV_MAX = 4 * SEARCH
+HALF_PEL_BIAS = 64      # cost units a half-pel refinement must beat, swept on dev
 
 _COST = np.round(np.log2(1.0 + np.arange(129)) * 8).astype(np.int32)
 
@@ -37,6 +47,31 @@ def new_video_model():
 
 # --------------------------------------------------------------------------
 # motion estimation (encoder only - the decoder just applies what it is told)
+
+
+def halfpel_planes(ref):
+    """The four half-pel phases of a reference plane, as (4, h, w) uint8.
+
+    Plane index is (dy & 1) * 2 + (dx & 1), so a half-pel vector splits into a
+    whole-pixel offset of `d >> 1` and a phase of `d & 1`. That works for
+    negative vectors too, because an arithmetic shift floors: -3 becomes offset
+    -2 and phase 1, which is -1.5 pixels.
+
+    Bilinear rather than a longer filter. A 6-tap would be sharper, but every
+    tap has to be reproduced bit-exactly by both implementations, and the
+    measurement said most of the win is in having *any* sub-pixel position at
+    all rather than in the quality of the interpolant.
+
+    Edges replicate, matching the clamping the pixel loop already does.
+    """
+    r = ref.astype(np.int32)
+    right = np.concatenate([r[:, 1:], r[:, -1:]], axis=1)
+    down = np.concatenate([r[1:, :], r[-1:, :]], axis=0)
+    diag = np.concatenate([right[1:, :], right[-1:, :]], axis=0)
+    return np.stack([r,
+                     (r + right + 1) >> 1,
+                     (r + down + 1) >> 1,
+                     (r + right + down + diag + 2) >> 2]).astype(np.uint8)
 
 
 def _shifted(ref, dy, dx):
@@ -59,12 +94,61 @@ def _residual_cost(a, b):
     return _COST[np.minimum(diff, 256 - diff)]
 
 
+def _gather_blocks(plane, mv, bs, h, w):
+    """Sample `plane` for every block at its own whole-pixel offset.
+
+    The half-pel refinement gives each block a different centre, so this is a
+    per-block gather rather than one global shift. Doing it with fancy indexing
+    keeps it a single numpy operation over the whole frame instead of a Python
+    loop over several hundred blocks.
+    """
+    nby, nbx = mv.shape[0], mv.shape[1]
+    ys = (np.arange(nby)[:, None] * bs + np.arange(bs)[None, :])[:, None, :] \
+        + mv[..., 0][:, :, None]
+    xs = (np.arange(nbx)[:, None] * bs + np.arange(bs)[None, :])[None, :, :] \
+        + mv[..., 1][:, :, None]
+    np.clip(ys, 0, h - 1, out=ys)
+    np.clip(xs, 0, w - 1, out=xs)
+    return plane[ys[:, :, :, None], xs[:, :, None, :]]
+
+
+def _block_cost_at(cur, planes, mv, bs):
+    """Cost of every block predicted from its own half-pel vector in `mv`."""
+    h, w = cur.shape
+    nby, nbx = mv.shape[0], mv.shape[1]
+    phase = (mv[..., 0] & 1) * 2 + (mv[..., 1] & 1)
+    whole = np.stack([mv[..., 0] >> 1, mv[..., 1] >> 1], axis=-1)
+    pad = np.zeros((nby * bs, nbx * bs), dtype=np.int32)
+    pad[:h, :w] = cur
+    blocks = pad.reshape(nby, bs, nbx, bs).transpose(0, 2, 1, 3)
+    out = np.zeros((nby, nbx), dtype=np.int64)
+    for p in range(4):
+        sel = phase == p
+        if not sel.any():
+            continue
+        got = _gather_blocks(planes[p], whole, bs, h, w)
+        cost = _residual_cost(blocks, got).sum(axis=(2, 3))
+        out = np.where(sel, cost, out)
+    return out
+
+
 def motion_search(cur, ref, bs=None, search=None):
-    """Full search on the luma plane; returns per-block best vector and cost."""
+    """Per-block best vector and cost, in half-pel units.
+
+    Two stages, because a full search over every half-pel position would cost
+    four times what the whole-pixel one does and the encoder is already bound
+    by this. Stage one is the same exhaustive whole-pixel search as before;
+    stage two tries the eight half-pel neighbours of whatever it found. That is
+    the standard arrangement and it recovers nearly all of the available gain -
+    sub-pixel motion is a refinement of the right whole-pixel match, not a
+    different match somewhere else.
+    """
     bs = BLOCK if bs is None else bs
     search = SEARCH if search is None else search
     h, w = cur.shape
     nby, nbx = -(-h // bs), -(-w // bs)
+    planes = halfpel_planes(ref)
+
     best = None
     bmv = np.zeros((nby, nbx, 2), dtype=np.int32)
     for dy in range(-search, search + 1):
@@ -77,6 +161,24 @@ def motion_search(cur, ref, bs=None, search=None):
             best = np.where(better, sums, best)
             bmv[..., 0] = np.where(better, dy, bmv[..., 0])
             bmv[..., 1] = np.where(better, dx, bmv[..., 1])
+
+    bmv *= 2                                    # whole pixels -> half-pel units
+    best = best.astype(np.int64)
+    # A half-pel vector costs more to send than the whole-pel one it refines:
+    # the magnitudes are coded in half-pel units, so an odd component roughly
+    # doubles the unary run. Requiring the refinement to beat the whole-pel
+    # match by a margin rather than merely tie is what stops a near-static clip
+    # paying for sub-pixel precision it has no use for. Swept on the dev split.
+    for sy in (-1, 0, 1):
+        for sx in (-1, 0, 1):
+            if sy == 0 and sx == 0:
+                continue
+            cand = bmv + np.array([sy, sx], dtype=np.int32)
+            cost = _block_cost_at(cur, planes, cand, bs)
+            better = cost + HALF_PEL_BIAS < best
+            best = np.where(better, cost, best)
+            bmv[..., 0] = np.where(better, cand[..., 0], bmv[..., 0])
+            bmv[..., 1] = np.where(better, cand[..., 1], bmv[..., 1])
     return bmv, best
 
 
@@ -103,6 +205,41 @@ def choose_modes(cur_y, ref_y, mv_penalty=48, bs=None):
 
 # --------------------------------------------------------------------------
 # mode / vector coding
+
+
+def _median3(a, b, c):
+    return a + b + c - min(a, b, c) - max(a, b, c)
+
+
+def mv_predictor(mvs, by, bx, nbx):
+    """Predict this block's vector from its already-coded neighbours.
+
+    The componentwise median of left, above and above-right, which is what
+    H.264 uses. The previous version here predicted from the left block alone
+    and reset to zero after every spatially-coded block, so a single intra
+    block in the middle of a smooth pan made the next vector cost full price.
+
+    A median is specifically better than an average for this: one neighbour
+    sitting on a moving object while the other two track the background gets
+    outvoted rather than dragging the prediction, which is the same reason the
+    match model wants a switch rather than a vote.
+
+    Blocks coded spatially count as zero vectors. Both sides walk the blocks in
+    raster order, so left, above and above-right are always already decided.
+    """
+    if by == 0:
+        if bx == 0:
+            return 0, 0
+        return int(mvs[0][bx - 1][0]), int(mvs[0][bx - 1][1])
+    ly, lx = (int(mvs[by][bx - 1][0]), int(mvs[by][bx - 1][1])) if bx else (0, 0)
+    uy, ux = int(mvs[by - 1][bx][0]), int(mvs[by - 1][bx][1])
+    if bx + 1 < nbx:
+        ry, rx = int(mvs[by - 1][bx + 1][0]), int(mvs[by - 1][bx + 1][1])
+    elif bx:
+        ry, rx = int(mvs[by - 1][bx - 1][0]), int(mvs[by - 1][bx - 1][1])
+    else:
+        ry, rx = 0, 0
+    return _median3(ly, uy, ry), _median3(lx, ux, rx)
 
 
 def _code_mv_component(coder, encode, bank, axis, value=None):
@@ -135,7 +272,6 @@ def code_block_info(coder, encode, bank, nby, nbx, modes=None, mvs=None):
         modes = np.zeros((nby, nbx), dtype=np.int32)
         mvs = np.zeros((nby, nbx, 2), dtype=np.int32)
     for by in range(nby):
-        pred_mv = (0, 0)
         for bx in range(nbx):
             left = modes[by][bx - 1] if bx else 0
             up = modes[by - 1][bx] if by else 0
@@ -145,24 +281,27 @@ def code_block_info(coder, encode, bank, nby, nbx, modes=None, mvs=None):
             else:
                 modes[by][bx] = coder.bit(bank["mode"], ctx)
             if modes[by][bx] == MODE_TEMPORAL:
+                py, px = mv_predictor(mvs, by, bx, nbx)
                 if encode:
-                    dy = int(mvs[by][bx][0]) - pred_mv[0]
-                    dx = int(mvs[by][bx][1]) - pred_mv[1]
-                    _code_mv_component(coder, True, bank, 0, dy)
-                    _code_mv_component(coder, True, bank, 1, dx)
+                    _code_mv_component(coder, True, bank, 0,
+                                       int(mvs[by][bx][0]) - py)
+                    _code_mv_component(coder, True, bank, 1,
+                                       int(mvs[by][bx][1]) - px)
                 else:
                     dy = _code_mv_component(coder, False, bank, 0)
                     dx = _code_mv_component(coder, False, bank, 1)
-                    mvs[by][bx][0] = dy + pred_mv[0]
-                    mvs[by][bx][1] = dx + pred_mv[1]
-                pred_mv = (int(mvs[by][bx][0]), int(mvs[by][bx][1]))
-            else:
-                pred_mv = (0, 0)
+                    mvs[by][bx][0] = dy + py
+                    mvs[by][bx][1] = dx + px
     return modes, mvs
 
 
 # --------------------------------------------------------------------------
 # jitted path
+
+
+def _phase_rows(rows):
+    """halfpel_planes for the reference path, which works in lists of ints."""
+    return [p.tolist() for p in halfpel_planes(np.array(rows, dtype=np.uint8))]
 
 
 def _inter_tuple(modes_i, mvs_i, block, sy, sx, ref):
@@ -200,9 +339,11 @@ def _encode_payload_fast(frames, block, luma_h, luma_w, progress):
                 ph, pw = pl.shape
                 sy = max(1, luma_h // ph)
                 sx = max(1, luma_w // pw)
+                phases = np.ascontiguousarray(
+                    halfpel_planes(prev[i].astype(np.uint8)), dtype=np.int64)
                 bank.code(coder, True, pl, min(i, 3), 1 if i in (1, 2) else 0,
                           1 if i == 0 else 0, errmap, flat,
-                          inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, prev[i]))
+                          inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, phases))
         prev = cur
         if progress:
             progress(fi, len(frames))
@@ -235,9 +376,11 @@ def _decode_payload_fast(payload, shapes, nframes, block, progress):
                 ph, pw = pl.shape
                 sy = max(1, luma_h // ph)
                 sx = max(1, luma_w // pw)
+                phases = np.ascontiguousarray(
+                    halfpel_planes(prev[i].astype(np.uint8)), dtype=np.int64)
                 bank.code(coder, False, pl, min(i, 3), 1 if i in (1, 2) else 0,
                           1 if i == 0 else 0, errmap, flat,
-                          inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, prev[i]))
+                          inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, phases))
         prev = cur
         out.append([p.astype(np.uint8) for p in cur])
         if progress:
@@ -313,7 +456,8 @@ def encode(frames, progress=None):
                 sx = max(1, luma_w // pw)
                 inter = model.InterInfo(modes.tolist(), mvs.tolist(),
                                         max(1, block // sy), max(1, block // sx),
-                                        sy, sx, prev_rows[i])
+                                        sy, sx,
+                                        _phase_rows(prev_rows[i]))
                 _, err = model.code_plane(coder, True, pw, ph, min(i, 3), bank,
                                           src=plane.tolist(), inter=inter,
                                           luma_err=luma_err if i in (1, 2) else None)
@@ -377,7 +521,8 @@ def decode(data, progress=None):
                 sy = max(1, luma_h // ph)
                 sx = max(1, luma_w // pw)
                 inter = model.InterInfo(modes, mvs, max(1, block // sy),
-                                        max(1, block // sx), sy, sx, prev_rows[i])
+                                        max(1, block // sx), sy, sx,
+                                        _phase_rows(prev_rows[i]))
                 rows, err = model.code_plane(coder, False, pw, ph, min(i, 3), bank,
                                              inter=inter,
                                              luma_err=luma_err if i in (1, 2) else None)

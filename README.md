@@ -70,7 +70,7 @@ error 55 — which is why nothing here is trusted on its label.)
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| **hve** | **317,769** | **7.66x** | lossless |
+| **hve** | **317,074** | **7.67x** | lossless |
 | x264 lossless (veryslow) | 321,053 | 7.58x | lossless |
 | x265 lossless (veryslow) | 323,443 | 7.52x | lossless |
 | AV1 lossless (libaom) | 329,528 | 7.38x | lossless |
@@ -79,33 +79,40 @@ error 55 — which is why nothing here is trusted on its label.)
 | Ut Video | 1,117,097 | 2.18x | lossless |
 | FFVHuff | 1,126,272 | 2.16x | lossless |
 
-Now first on this clip, ahead of x264, x265, AV1 and VP9 in lossless mode and
-2.3x smaller than FFV1. The learned combiner moved it from 325,399 (third,
-1.4% behind x264) to 317,769, a 2.3% gain on a change made and tuned entirely
-against still images. Measured with ffmpeg 6.1.6.
+Ahead of x264, x265, AV1 and VP9 in lossless mode, and 2.4x smaller than FFV1.
+Measured with ffmpeg 6.1.6.
 
-On high-motion content the ranking changes. Same 16-frame test on `foreman_cif`,
-which pans and has fast head movement:
+High-motion content used to be where this lost. Same 16-frame test on
+`foreman_cif`, which pans and has fast head movement:
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
+| **hve** | **837,709** | **2.90x** | lossless |
 | x264 lossless | 846,081 | 2.88x | lossless |
 | AV1 lossless | 851,838 | 2.86x | lossless |
 | x265 lossless | 852,986 | 2.85x | lossless |
-| **hve** | **864,027** | **2.82x** | lossless |
 | VP9 lossless | 886,928 | 2.74x | lossless |
 | FFV1 level 3 | 971,089 | 2.51x | lossless |
 
-hve gives up its lead here — 2.1% behind x264 and 1.4% behind AV1, against 12%
-ahead of FFV1. The learned combiner narrowed this too, from 883,078, where the
-deficits were 4.4% and 3.7%; but it did not close it, and that is the expected
-shape of the result. What is missing on this clip is motion modelling, which a
-better spatial combiner does not touch. That is the price of a deliberately
-simple inter design: one reference frame, full-pel vectors only, a single 16x16
-block size, no bidirectional prediction. Halving the block size to 8x8 was
-measured and made it slightly *worse* (more mode and vector overhead than it
-saves), so the missing ingredient is sub-pixel motion and variable block sizes,
-not finer blocks.
+Now first here too, 1.0% ahead of x264. This was 883,078 and fourth two changes
+ago. Half of the move came from the learned combiner, which was built for still
+images and never tuned on video; the rest came from **half-pel motion vectors**,
+which is the one thing this README previously named as the missing ingredient.
+
+Sub-pixel motion matters because real movement does not land on the pixel grid.
+Rounding a vector to the nearest whole pixel leaves a residual that no amount of
+context modelling recovers, and the effect is confined to exactly the clips that
+move: measured before it was built, half-pel was worth 5-8% on the three
+high-motion dev clips and essentially nothing on the near-static ones.
+
+The other half of that old prediction was wrong. **Variable block sizes were
+measured and rejected**: splitting 16x16 into four 8x8 vectors scored *worse* on
+every clip, by 1.2% on bus and 22.5% on akiyo, because the extra vectors cost
+more than the sharper motion boundaries save. `docs/research.md` records that
+alongside the other rejected idea from this round.
+
+The inter design is still deliberately simple: one reference frame, one block
+size, no bidirectional prediction.
 
 Reproduce with `python tools/bench_image.py test` and
 `python tools/bench_video.py testdata/video/akiyo_cif.y4m 16`. Every baseline is
@@ -211,11 +218,18 @@ quietly writing files only one path can read.
 
 The first frame is coded as a still image. Every later frame is split into 16x16
 blocks, each independently choosing between spatial prediction and temporal
-prediction from the previous frame at a motion vector found by full search over
-±8 pixels. Modes and vectors are coded first, so pixel residuals can still be
-coded in plain raster order with full access to their spatial neighbours.
-Temporally predicted pixels get their own set of probability banks, since their
-residuals look nothing like spatial ones.
+prediction from the previous frame at a motion vector. Vectors are in **half-pel
+units**, found by exhaustive whole-pixel search over ±8 pixels followed by a
+refinement over the eight neighbouring half-pel positions; the reference is
+bilinearly interpolated to four phases and the vector's low bit selects one.
+Chroma divides the luma vector down first, which lands it on quarter-pel
+positions of the luma grid for free. Vectors are predicted from the median of
+the left, above and above-right neighbours, as in H.264.
+
+Modes and vectors are coded first, so pixel residuals can still be coded in
+plain raster order with full access to their spatial neighbours. Temporally
+predicted pixels get their own set of probability banks, since their residuals
+look nothing like spatial ones.
 
 Reads and writes `.y4m`, so real test clips work end to end and chroma planes
 are coded at their native subsampled size.
@@ -238,10 +252,11 @@ are coded at their native subsampled size.
   than in the entropy coder or the binarisation — raw unmodelled bits are only
   4.6% of the file — and the learned combiner is what acted on that finding.
   `docs/research.md` has every number and every reason.
-- **Video uses only the previous frame**, full-pel motion, one block size, and
-  no bidirectional prediction. That is enough to lead on low-motion content
-  (akiyo), but on high-motion content x264, AV1 and x265 are all still ahead
-  (see `results/video_foreman.txt`).
+- **Video uses only the previous frame**, one block size, and no bidirectional
+  prediction. It now leads x264, x265, AV1 and VP9 on both test clips, but that
+  is two CIF clips and should not be read as a general claim — the encoder is
+  also far slower than any of them, and multiple reference frames and
+  bidirectional prediction are the obvious things it still does not do.
 - **Already-compressed input is not the target.** Feeding a JPEG in means
   decoding it to pixels and re-compressing those pixels losslessly, which will
   usually be *larger* than the JPEG. Shrinking an existing JPEG/AVIF/H.265 file
