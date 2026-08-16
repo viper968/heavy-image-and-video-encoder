@@ -9,7 +9,7 @@ spatial neighbours.
 
 import numpy as np
 
-from . import fast, model, native, rc
+from . import model, native, rc
 from .bitio import Reader, Writer
 from .transform import predict_plane, rct_forward, rct_inverse
 
@@ -434,16 +434,12 @@ def code_block_info(coder, encode, bank, nby, nbx, modes=None, mvs=None):
 
 
 # --------------------------------------------------------------------------
-# jitted path
+# native path
 
 
 def _phase_rows(rows):
-    """halfpel_planes for the reference path, which works in lists of ints."""
+    """halfpel_planes for the pure-Python path, which works in lists of ints."""
     return [p.tolist() for p in halfpel_planes(np.array(rows, dtype=np.uint8))]
-
-
-def _inter_tuple(modes_i, mvs_i, block, sy, sx, ref):
-    return (1, modes_i, mvs_i, max(1, block // sy), max(1, block // sx), sy, sx, ref)
 
 
 def _native_inter(modes_i, mvs_i, block, sy, sx, prev_plane):
@@ -452,12 +448,11 @@ def _native_inter(modes_i, mvs_i, block, sy, sx, prev_plane):
 
 
 def _encode_payload_native(frames, block, luma_h, luma_w, progress):
-    """Same frame loop as the numba path, through the C kernel.
+    """The frame loop, with the per-pixel coding done by the C kernel.
 
-    Planes stay uint8 the whole way. The numba path widens them to int64 because
-    its kernel and the reference implementation share array types; here nothing
-    is shared, and at 1080p the four half-pel phases of a luma plane are 8 MB as
-    bytes against 66 MB widened.
+    Planes stay uint8 the whole way, which matters at 1080p: the four half-pel
+    phases of a luma plane are 8 MB as bytes and 66 MB widened to int64, and the
+    kernel reads them at random offsets where cache behaviour is the whole cost.
     """
     samples = sum(p.size for p in _to_planes(frames[0])[0]) * len(frames)
     coder = native.Coder(True, capacity=samples * 2 + 65536)
@@ -523,92 +518,6 @@ def _decode_payload_native(payload, shapes, nframes, block, progress):
     return out
 
 
-def _encode_payload_fast(frames, block, luma_h, luma_w, progress):
-    """Same frame loop as the reference below, with the jitted primitives.
-
-    Motion search stays in numpy and block decisions stay here; only the
-    per-pixel coding and the block-info bits cross into the kernel.
-    """
-    samples = sum(p.size for p in _to_planes(frames[0])[0]) * len(frames)
-    coder = fast.Coder(True, capacity=samples * 2 + 65536)
-    bank = fast.Bank(video=True)
-    errmap = np.zeros((luma_h, luma_w), dtype=np.int64)
-    flat = np.zeros(luma_h * luma_w, dtype=np.int64)
-    prev = None
-
-    for fi, frame in enumerate(frames):
-        planes, _ = _to_planes(frame)
-        cur = [np.ascontiguousarray(p, dtype=np.int64) for p in planes]
-        if prev is None:
-            for i, pl in enumerate(cur):
-                bank.code(coder, True, pl, min(i, 3), 1 if i in (1, 2) else 0,
-                          1 if i == 0 else 0, errmap, flat)
-        else:
-            modes, mvs = choose_modes(planes[0], prev[0].astype(np.uint8), bs=block)
-            modes_i = np.ascontiguousarray(modes, dtype=np.int64)
-            mvs_i = np.ascontiguousarray(mvs, dtype=np.int64)
-            fast._code_block_info(True, coder.st, coder.data, coder.out, bank.mode_p,
-                                  bank.mv_zero, bank.mv_sign, bank.mv_mag,
-                                  modes_i, mvs_i, MV_MAX)
-            for i, pl in enumerate(cur):
-                ph, pw = pl.shape
-                sy = max(1, luma_h // ph)
-                sx = max(1, luma_w // pw)
-                # uint8, not int64: at 1080p the four phases of a luma plane
-                # are 66 MB widened and 8 MB as bytes, and the kernel reads
-                # them at random offsets where cache behaviour is what matters.
-                phases = np.ascontiguousarray(
-                    halfpel_planes(prev[i].astype(np.uint8)), dtype=np.uint8)
-                bank.code(coder, True, pl, min(i, 3), 1 if i in (1, 2) else 0,
-                          1 if i == 0 else 0, errmap, flat,
-                          inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, phases))
-        prev = cur
-        if progress:
-            progress(fi, len(frames))
-    return coder.finish()
-
-
-def _decode_payload_fast(payload, shapes, nframes, block, progress):
-    coder = fast.Coder(False, payload=payload)
-    bank = fast.Bank(video=True)
-    luma_h, luma_w = shapes[0]
-    errmap = np.zeros((luma_h, luma_w), dtype=np.int64)
-    flat = np.zeros(luma_h * luma_w, dtype=np.int64)
-    nby, nbx = -(-luma_h // block), -(-luma_w // block)
-    prev = None
-    out = []
-
-    for fi in range(nframes):
-        cur = [np.zeros((h, wd), dtype=np.int64) for (h, wd) in shapes]
-        if prev is None:
-            for i, pl in enumerate(cur):
-                bank.code(coder, False, pl, min(i, 3), 1 if i in (1, 2) else 0,
-                          1 if i == 0 else 0, errmap, flat)
-        else:
-            modes_i = np.zeros((nby, nbx), dtype=np.int64)
-            mvs_i = np.zeros((nby, nbx, 2), dtype=np.int64)
-            fast._code_block_info(False, coder.st, coder.data, coder.out, bank.mode_p,
-                                  bank.mv_zero, bank.mv_sign, bank.mv_mag,
-                                  modes_i, mvs_i, MV_MAX)
-            for i, pl in enumerate(cur):
-                ph, pw = pl.shape
-                sy = max(1, luma_h // ph)
-                sx = max(1, luma_w // pw)
-                # uint8, not int64: at 1080p the four phases of a luma plane
-                # are 66 MB widened and 8 MB as bytes, and the kernel reads
-                # them at random offsets where cache behaviour is what matters.
-                phases = np.ascontiguousarray(
-                    halfpel_planes(prev[i].astype(np.uint8)), dtype=np.uint8)
-                bank.code(coder, False, pl, min(i, 3), 1 if i in (1, 2) else 0,
-                          1 if i == 0 else 0, errmap, flat,
-                          inter=_inter_tuple(modes_i, mvs_i, block, sy, sx, phases))
-        prev = cur
-        out.append([p.astype(np.uint8) for p in cur])
-        if progress:
-            progress(fi, nframes)
-    return out
-
-
 # --------------------------------------------------------------------------
 # container
 
@@ -643,10 +552,8 @@ def encode(frames, progress=None):
     block = BLOCK
     luma_h, luma_w = first[0].shape
 
-    if native.available() or fast.available():
-        build = (_encode_payload_native if native.available()
-                 else _encode_payload_fast)
-        payload = build(frames, block, luma_h, luma_w, progress)
+    if native.available():
+        payload = _encode_payload_native(frames, block, luma_h, luma_w, progress)
         w.varint(len(payload))
         w.raw(payload)
         return w.bytes()
@@ -714,11 +621,10 @@ def decode(data, progress=None):
     payload_len = r.varint()
     payload = r.raw(payload_len)
 
-    if native.available() or fast.available():
-        run = (_decode_payload_native if native.available()
-               else _decode_payload_fast)
+    if native.available():
         out = []
-        for planes in run(payload, shapes, nframes, block, progress):
+        for planes in _decode_payload_native(payload, shapes, nframes, block,
+                                             progress):
             out.append(rct_inverse(planes) if flags & FLAG_RCT else planes)
         return out
 

@@ -1,6 +1,6 @@
 /* Native pixel loop and range coder. Byte-identical to hve/model.py.
  *
- * This is a deliberately boring transcription of hve/fast.py: same variable
+ * This is a deliberately boring transcription of model.code_plane: same variable
  * names, same order of operations, same comment anchors. A clever rewrite would
  * be faster to read and impossible to diff against the reference when the model
  * changes, and the model changes often.

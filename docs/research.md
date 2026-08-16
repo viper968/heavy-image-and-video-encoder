@@ -307,11 +307,11 @@ cost map per position. In C the loop nest inverts: blocks outside, positions
 inside, the running best in a register and the reference window in L1. Most of
 the single-threaded gain is this, not the code generation.
 
-**The scratch buffers are narrower.** `fast.py` shares its arrays with the
-reference implementation's Python lists and so carries everything as int64. In C
-nothing is shared, so the match model's history is `uint8` (it holds pixel
-values) and its hash table is `int32` (it holds sample indices). At 1080p that
-is 6 MB of random-access working set instead of 24 MB.
+**The scratch buffers are narrower.** The numba path shared its arrays with the
+reference implementation and so carried everything as int64. In C nothing is
+shared, so the match model's history is `uint8` (it holds pixel values) and its
+hash table is `int32` (it holds sample indices). At 1080p that is 6 MB of
+random-access working set instead of 24 MB.
 
 **The per-pixel divisions got cheaper.** The self-correcting blend does four
 divisions by a small sum of recent errors; those are now a 2048-entry table with
@@ -376,22 +376,75 @@ optimisation here and charge each candidate its actual coding cost. That has
 never been tried in this codec and is now the most concrete untried motion idea,
 ahead of multiple reference frames.
 
-### The cost of a third implementation
+## The cost of a third implementation, and why there are two again
 
-There are now three implementations of one loop, and the honest accounting is
-that this is a real maintenance tax: `model.py` defines the format, `fast.py`
-mirrors it in numba, `csrc/` mirrors it in C, and any model change means three
-edits and a byte-identity check. The C is written as a deliberately boring
-transcription — same variable names, same order of operations, same comment
-anchors — specifically so that diffing it against `fast.py` stays possible.
+Adding the C made three implementations of one loop: `model.py` defining the
+format, `fast.py` mirroring it in numba, `csrc/` mirroring it in C. That was
+one too many, and `fast.py` was deleted. The reasoning is worth recording,
+because "keep the fallback, it costs nothing" is the intuitive answer and it is
+wrong.
 
-What makes the tax payable is that the failure mode is loud. `tests/test_native.py`
-compares bytes across backends on odd shapes, real photographs and real clips,
-and the pure-Python reference still runs under `NUMBA_DISABLE_JIT=1
-HVE_NO_NATIVE=1`. Worth noting what happened here as a warning: adding the
-native backend silently broke `test_video_fast_path_is_byte_identical`, which
-disabled only the numba path to reach the reference and so began comparing the
-native path against itself. It passed, testing nothing, until it was read.
+**The tax is not occasional, it is total.** Every commit in this repo's history
+that touched `model.py` also touched `fast.py` — five out of five:
+
+    5c64cc5  Rewrite the motion search
+    f200a4b  Half-pel motion vectors
+    d057abc  Replace the averaging blend with a learned combiner
+    6ba47bd  Second APM stage
+    29bc9af  Let the sign and length bins see the match model
+
+Mirroring is not a thing that happens sometimes when the model changes. It is
+what changing the model *is*. Compression experiments are this project's entire
+activity, so a third file taxes the one thing it exists to do.
+
+**The tier it bought was narrow and expensive.** Measured on one input, encode:
+
+| path | s/megapixel | a 768x512 Kodak photo |
+|---|---:|---:|
+| C | 1.1 | 0.4s |
+| numba | 11.4 | 4.5s |
+| pure Python | 148.7 | 58s |
+
+So `fast.py` served exactly one population: someone with numba installed and no
+C compiler, for whom the alternative is a minute per photo. That is real —
+Windows without MSVC, slim containers — but it costs **211 MB of dependency**
+(llvmlite alone is 180 MB) to be 2-4x slower than a compiler that is usually
+already on the machine. numba also lags new Python releases by months, so the
+fallback is least likely to work exactly when someone is on a new Python.
+
+**And it had stopped adding coverage.** `fast.py` earned its keep as a second
+opinion while it was the only accelerated path. Once the C was pinned directly
+against `model.py`, the third implementation was redundancy, not coverage — and
+in this very session it actively *hid* a broken test: adding the native backend
+silently broke `test_video_fast_path_is_byte_identical`, which disabled only the
+numba path to reach the reference and so began comparing native against itself.
+It passed, testing nothing, until it was read.
+
+Deleting it changed no output byte on any test clip or image, and made the suite
+faster.
+
+### What that costs, stated plainly
+
+Someone without a C compiler now falls from 4.5s to 58s per photo. That is a
+real regression for them, accepted deliberately: the fallback is a correctness
+guarantee — you can always decode a file — not a usable working mode. The
+proper fix is packaging with prebuilt wheels, which this repo does not have and
+which would be a better use of the effort than a hand-mirrored kernel.
+
+### What keeps two implementations honest
+
+The C is written as a deliberately boring transcription of `model.code_plane` —
+same variable names, same order of operations, same comment anchors — so that
+diffing them stays possible when the model changes.
+
+The awkward consequence of losing the middle tier is that byte-identity is now
+checked *against a 150s/megapixel reference*. So those tests run on deliberately
+tiny inputs (a 40x56 photo crop, 32x48 frames with 16x24 chroma), chosen to
+still cover odd dimensions, single rows and columns, the fourth plane kind, and
+subsampled chroma with real sub-pixel motion. Real photographs and real clips
+are covered by roundtrip and invariant tests, which only need the fast path.
+Enlarging the identity cases would make the suite slow enough to stop being run,
+which is a worse failure than the one it would be guarding against.
 
 ### An open finding: the match model costs 7.3% on 1080p Sintel
 

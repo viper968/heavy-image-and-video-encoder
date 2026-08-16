@@ -1,9 +1,9 @@
 #!/bin/sh
 # Thin wrapper so you never have to think about which python to run.
 #
-# The codec silently falls back to a ~30x slower pure-Python path when numba is
-# absent, which makes "did I use the right interpreter?" an easy and expensive
-# mistake. This always uses the project venv.
+# The codec silently falls back to a ~100x slower pure-Python path when the C
+# backend is not built, which makes "did I use the right interpreter?" an easy
+# and expensive mistake. This always uses the project venv.
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 if [ ! -x "$ROOT/.venv/bin/python" ]; then

@@ -5,8 +5,8 @@ then whichever of the three documents below matches what you are about to do.
 Update this file when the state it describes stops being true; a stale handoff
 is worse than none.
 
-**Last verified: the C backend, all 73 tests green, benchmarks in `results/`
-regenerated against it.**
+**Last verified: the C backend and the removal of the numba path, all 72
+tests green, benchmarks in `results/` regenerated against it.**
 
 ## What this is
 
@@ -83,43 +83,47 @@ Pillow installed system-wide, and it fails on a clean clone.
 - A **C compiler** (`cc`, or `$CC`) makes the native backend available. It is
   built on first import and rebuilt automatically whenever anything in `csrc/`
   is newer, so there is no build step to remember. With no compiler the codec
-  falls back to numba and everything still works.
-- Run everything as `.venv/bin/python`. Bare `python3` lacks numba and
-  imagecodecs, and the codec will silently fall back to the slow path.
+  falls back to the pure-Python reference: still correct, roughly 100x slower,
+  about a minute per Kodak photo. Treat that as a guarantee, not a usable mode.
+- Run everything as `.venv/bin/python`. Bare `python3` lacks imagecodecs and may
+  not find the built library, and the codec will silently use the slow path.
 - Git pushes need `gh auth setup-git` once.
 - Branch `claude/extreme-compression-experiment-ar5swo`, already merged to
   `main` once via PR #1. Never force-push.
 
 ## The one thing that will bite you
 
-There are **three implementations of the codec's core loop**:
+There are **two implementations of the codec's core loop**:
 
 - `hve/model.py` — the readable reference, and the definition of the format.
-- `hve/fast.py` — the same loop compiled by numba, ~30x faster than the
-  reference, used when numba imports and the C library is unavailable.
-- `csrc/kernel.c` via `hve/native.py` — the same loop again in C, another
-  1.5-2x on the pixel loop, preferred whenever it builds. Built automatically
-  on first import and cached at `hve/_hve*.so`; `HVE_NO_NATIVE=1` disables it.
+- `csrc/kernel.c` via `hve/native.py` — the same loop in C, ~100x faster, and
+  what actually runs. Built automatically on first import and cached at
+  `hve/_hve*.so`; `HVE_NO_NATIVE=1` forces the reference instead.
 
-Any model change must be made in **all three**, and they must produce
+Any model change must be made in **both**, and they must produce
 **byte-identical** output. `tests/test_native.py` and the two
 `*_is_byte_identical` tests in `tests/test_codecs.py` enforce it. They have
 caught three real divergences that would otherwise have made the paths write
 mutually unreadable files, and in one case the buggy path compressed *better*,
 which is exactly how such a bug hides.
 
+There was a third, `hve/fast.py`, in numba. It was deleted after the C landed —
+all five model changes in this repo's history had to be mirrored into it by
+hand, and it had stopped adding coverage. Do not add it back without reading
+"The cost of a third implementation" in `docs/research.md`.
+
 Practical workflow that works well:
 
-1. Make the change in all three files.
+1. Make the change in both files.
 2. `.venv/bin/python tools/quick.py dev` — dev-set size in ~2s.
 3. If it wins, `.venv/bin/python -m pytest tests -q` to confirm the paths agree.
 4. If the tests fail, the implementations have diverged; the measurement is
    meaningless until they agree. Do not record a number from a diverged state.
 
-If three is too many to maintain for a change you are exploring, set
-`HVE_NO_NATIVE=1` and work in `model.py` + `fast.py` first, then port to C once
-the idea has earned its place. What you must **not** do is leave the C stale and
-enabled — it is the path that runs by default, so a stale C kernel means every
+You can explore in `model.py` alone with `HVE_NO_NATIVE=1` and port to C once
+the idea has earned its place — but only on small inputs, because the reference
+is ~150s per megapixel. What you must **not** do is leave the C stale and
+enabled: it is the path that runs by default, so a stale C kernel means every
 number you measure comes from the old model.
 
 **Beware of tests that disable one backend to reach the reference.** Adding the
@@ -128,25 +132,30 @@ off only `fast.available` and so began comparing native against native. It
 passed while testing nothing. Any such test must disable *every* accelerated
 backend.
 
+Because byte-identity now costs reference-speed, those tests deliberately run on
+tiny inputs — a 40x56 photo crop, 32x48 frames. Real photographs and real clips
+are covered by roundtrip and invariant tests instead. Do not "improve" the
+identity cases by enlarging them; the suite runs in under four seconds and that
+is why it gets run.
+
 Gotchas that have already caused wrong measurements:
 
-- numba lets a variable carry over between loop iterations if it is assigned on
-  only one path. The reference resets it. Initialise new per-pixel variables at
-  the top of the pixel loop in `fast.py`.
-- `fast.py` receives tunables through a flat `params` array. **Append** new
-  entries; inserting one shifts every index after it and silently scrambles the
-  model.
+- Initialise new per-pixel variables at the top of the pixel loop. A value
+  assigned on only one branch stays alive into the next pixel in C, and did in
+  numba too; the reference resets it, so the two diverge.
+- The C kernel receives tunables through the flat array built by
+  `model.coder_params()`. **Append** new entries; inserting one shifts every
+  index after it and silently scrambles the model. `csrc/hve.h` has the enum.
 - Context ordering matters: a context computed before the value it depends on
   will read the previous pixel's value. Check where in the loop your input is
   actually assigned.
 - Integer division must round identically in both paths. The learned combiner
-  divides by input energy, and rather than trust Python and numba to agree on
+  divides by input energy, and rather than trust the two languages to agree on
   how a negative quotient floors, it takes the absolute value, divides, and
-  reapplies the sign. Do the same for any new division; `//` on a negative
-  numerator is the kind of thing that diverges silently on one platform.
+  reapplies the sign. Do the same for any new division.
 - The combiner reads a second row of history (`prev2`) that nothing else uses.
   If you add state with a lifetime longer than one row, rotate it in both files
-  — `model.py` rebinds lists, `fast.py` copies arrays element by element.
+  — `model.py` rebinds lists, `kernel.c` memcpys arrays.
 - Motion vectors are in **half-pel** units. A vector splits into `d >> 1` whole
   pixels and a phase of `d & 1` indexing four interpolated reference planes,
   and the shift must stay arithmetic so negative vectors floor to the correct
@@ -156,12 +165,12 @@ Gotchas that have already caused wrong measurements:
   `/` truncates toward zero where `//` floors, so every division whose numerator
   can go negative uses `hve_fdiv()`; `>>` on a negative value is
   implementation-defined before C23, so `csrc/hve.h` static-asserts that it is
-  arithmetic; and signed overflow is undefined where numba's int64 wraps, so the
-  build passes `-fwrapv`. Adding a division or a shift to the C kernel without
+  arithmetic; and signed overflow is undefined where Python's integers are
+  arbitrary precision, so the build passes `-fwrapv`. Adding a division or a shift to the C kernel without
   checking which case it is will produce a stream the other two paths cannot
   read, on some machines only.
-- The C kernel narrows several scratch arrays that `fast.py` keeps as int64
-  (`flat` is uint8, `match_table` and `lmsw` are int32, `errmap` is uint8). If
+- The C kernel narrows several scratch arrays (`flat` is uint8, `match_table`
+  and `lmsw` are int32, `errmap` is uint8). If
   you widen the range of anything stored there — say a combiner weight clamp
   above 2^31 — the C path will wrap where the others do not.
 
@@ -174,6 +183,14 @@ change to do so. Stills encode 1.7x faster. Full table in "The C port" in
 `docs/research.md`, including the four reasons it beat numba (none of which is
 "C is faster") and the one narrowing that was tried and reverted for being
 inside the noise.
+
+**Then `hve/fast.py` was deleted.** Adding the C made three implementations of
+one loop, which was one too many: every model-changing commit in this repo's
+history — five of five — had to be mirrored into the numba file by hand, and
+once the C was pinned directly against the reference the numba path added
+redundancy rather than coverage. It cost 211 MB of dependency (llvmlite alone is
+180 MB) to serve only the "numba installed, no C compiler" case. Output did not
+change by a byte; the test suite got faster. Same section of `research.md`.
 
 Two things fell out of writing it that matter more than the speed:
 

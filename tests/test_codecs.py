@@ -231,18 +231,6 @@ def test_match_model_does_not_cost_on_unrepetitive_data():
     assert np.array_equal(image.decode(image.encode(photo)), photo)
 
 
-def _payload_with(frames, use_native):
-    """Encode a clip through one specific backend, whatever else is installed."""
-    from hve import native
-    real = native.available
-    try:
-        if not use_native:
-            native.available = lambda: False
-        return video.encode(frames)
-    finally:
-        native.available = real
-
-
 def _reference_payload(planes):
     """The pure-Python path, run directly, for comparison against the jitted one."""
     from hve import rc as _rc
@@ -259,34 +247,36 @@ def _reference_payload(planes):
     return coder.finish()
 
 
-def test_fast_path_is_byte_identical():
-    """The jitted path is a second implementation of the format's core loop.
+def test_accelerated_path_is_byte_identical():
+    """The C kernel is a second implementation of the format's core loop.
 
     A one-bit divergence would silently corrupt every file written by whichever
     path happened to run, so the two must agree exactly, not merely closely.
+    tests/test_native.py carries the wider version of this; the case is repeated
+    here so the core suite still fails if the two ever part company.
     """
-    from hve import fast
-    if not fast.available():
-        pytest.skip("numba not installed")
+    from hve import native
+    if not native.available():
+        pytest.skip("native backend unavailable: %s" % native.load_error())
     from PIL import Image as PILImage
     cases = [np.array(PILImage.open(PHOTO).convert("RGB"))[:48, :64],
              synthetic(33, 51, 3),
              np.random.default_rng(7).integers(0, 256, (24, 24, 3), dtype=np.uint8)]
     for img in cases:
         planes, _ = image._planes_from_image(img)
-        planes = np.ascontiguousarray(planes)
-        assert fast.encode_planes(planes) == _reference_payload(planes)
+        planes = np.ascontiguousarray(planes, dtype=np.uint8)
+        assert native.encode_planes(planes) == _reference_payload(planes)
 
 
-def test_fast_path_roundtrips():
-    from hve import fast
-    if not fast.available():
-        pytest.skip("numba not installed")
+def test_accelerated_path_roundtrips():
+    from hve import native
+    if not native.available():
+        pytest.skip("native backend unavailable: %s" % native.load_error())
     img = synthetic(40, 56, 3)
     planes, _ = image._planes_from_image(img)
-    planes = np.ascontiguousarray(planes)
-    blob = fast.encode_planes(planes)
-    back = fast.decode_planes(blob, planes.shape[0], planes.shape[1], planes.shape[2])
+    planes = np.ascontiguousarray(planes, dtype=np.uint8)
+    blob = native.encode_planes(planes)
+    back = native.decode_planes(blob, *planes.shape)
     assert np.array_equal(back, planes)
 
 
@@ -360,32 +350,27 @@ def test_video_block_size_travels_in_the_header():
         assert np.array_equal(want[0], got[0])
 
 
-def test_video_fast_path_is_byte_identical():
+def test_video_accelerated_path_is_byte_identical():
     """Video shares the kernel via the inter branch; pin it the same way.
 
-    Both accelerated backends have to be switched off to reach the reference,
-    not just numba: when this only disabled `fast` it started comparing the
-    native path against itself the moment the C backend landed, and passed
-    without testing anything.
+    Kept small on purpose: this runs the pure-Python loop, which costs about
+    150 seconds per megapixel, so the frames here are the largest that still
+    exercise subsampled chroma and real motion within a fast test.
     """
-    from hve import fast, native
-    if not fast.available():
-        pytest.skip("numba not installed")
+    from hve import native
+    if not native.available():
+        pytest.skip("native backend unavailable: %s" % native.load_error())
     base = [synthetic(32, 48, 1, seed=0), synthetic(16, 24, 1, seed=1),
             synthetic(16, 24, 1, seed=2)]
     frames = [[np.roll(p, i * 3, axis=1) for p in base] for i in range(4)]
 
-    real_fast, real_native = fast.available, native.available
+    real = native.available
     try:
-        fast.available = lambda: False
         native.available = lambda: False
         reference = video.encode(frames)
     finally:
-        fast.available, native.available = real_fast, real_native
+        native.available = real
     assert video.encode(frames) == reference
-
-    fast_bytes = _payload_with(frames, use_native=False)
-    assert fast_bytes == reference
 
     out = video.decode(reference)
     for want, got in zip(frames, out):

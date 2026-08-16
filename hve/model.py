@@ -345,8 +345,8 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
 
         for x in range(width):
             mval = -1
-            # Reset per-pixel, not carried over: fast.py compiles this loop and
-            # numba keeps a value alive across iterations if only one branch
+            # Reset per-pixel, not carried over: csrc/kernel.c mirrors this loop
+            # and a value left alive across iterations there — as numba also did
             # assigns it.
             lms_on = False
             lms_base_w = 0
@@ -698,7 +698,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
 
             if lms_on:
                 # NLMS: w += mu * err * x / |x|^2. The division is done once and
-                # the sign carried separately, so the reference and the jitted
+                # the sign carried separately, so the reference and the C
                 # path cannot disagree about how a negative quotient rounds.
                 #
                 # This learns from the combiner's own prediction even on pixels
@@ -751,3 +751,27 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
         werr_prev, werr_cur = werr_cur, [[0] * (width + 2) for _ in range(4)]
 
     return rows, err_rows
+
+
+def coder_params():
+    """The tunables the compiled backends read, as a flat array.
+
+    `hve/native.py` hands this straight to the C kernel, which indexes it by
+    position, so the order is part of the contract: **append only**. Inserting an
+    entry shifts every index after it and silently scrambles the model rather
+    than failing. `csrc/hve.h` carries the matching enum.
+
+    Read at call time rather than baked in, so the sweeps in `tools/` still take
+    effect. It lives here, next to the constants it reads.
+    """
+    import numpy as np
+
+    from . import rc, video as _video
+    return np.array([
+        NACT, NERR, NLUM, NSIDE, NDIFF, NMATCH, MAX_NB, MATCH_MAX_LEN,
+        MATCH_TRUST, WP_P1, WP_P2, WP_SHIFT,
+        WP_MAXW[0], WP_MAXW[1], WP_MAXW[2], WP_MAXW[3],
+        MATCH_HASH_MASK, rc.ADAPT_SHIFT, _video.MV_MAX,
+        LMS_NPRED, LMS_WSHIFT, LMS_RATE, LMS_EPS,
+        LMS_STEP_CLAMP, LMS_WCLAMP, NADJ, LMS_ACT_SHIFT, LMS_NDIR,
+    ], dtype=np.int64)

@@ -1,13 +1,17 @@
 /* Shared declarations for the native codec core.
  *
- * This is the third implementation of the pixel loop, after hve/model.py (the
- * reference and the definition of the format) and hve/fast.py (the numba
- * mirror). All three must produce byte-identical streams; tests/test_native.py
- * and tests/test_codecs.py enforce it. Read docs/HANDOFF.md before changing
+ * This is the second implementation of the pixel loop. hve/model.py is the
+ * first, and it is the definition of the format; this one is what actually
+ * runs. The two must produce byte-identical streams; tests/test_native.py and
+ * tests/test_codecs.py enforce it. Read docs/HANDOFF.md before changing
  * anything here.
  *
- * Two language-level hazards separate C from Python and numba, and both are
- * handled explicitly rather than assumed:
+ * (There was briefly a third, hve/fast.py, in numba. It was removed once this
+ * one existed: it cost a mirrored edit on every model change while adding no
+ * coverage this file does not already provide. See docs/research.md.)
+ *
+ * Two language-level hazards separate C from Python, and both are handled
+ * explicitly rather than assumed:
  *
  *   - `/` truncates toward zero in C and floors in Python. Every division whose
  *     numerator can be negative goes through hve_fdiv().
@@ -16,8 +20,8 @@
  *     below fails the build on one that does not, rather than silently writing
  *     a stream the other two paths cannot read.
  *
- * Signed overflow is undefined in C but wraps in numba's int64. The build
- * passes -fwrapv so the two agree.
+ * Signed overflow is undefined in C but is well defined on Python's
+ * arbitrary-precision integers. The build passes -fwrapv so the two agree.
  */
 
 #ifndef HVE_H
@@ -65,7 +69,7 @@ static inline int64_t hve_bisect(hve_ladder l, int64_t v)
     return i;
 }
 
-/* Indices into the params array, mirroring hve/fast.py. Append only. */
+/* Indices into the params array built by model.coder_params(). Append only. */
 enum {
     P_NACT, P_NERR, P_NLUM, P_NSIDE, P_NDIFF, P_NMATCH, P_MAXNB, P_MATCHMAX,
     P_MATCHTRUST, P_WP1, P_WP2, P_WPSHIFT, P_W0, P_W1, P_W2, P_W3, P_HASHMASK,
@@ -78,8 +82,8 @@ enum {
 #define HVE_LMS_MAX 32          /* upper bound on LMS_NPRED, for stack arrays */
 
 /* Range-coder state. Encoding uses low/range/cache/cache_size/pos; decoding
- * reuses the same five slots as code/range/pos, exactly as the numba path does,
- * so Python can hand the identical five-element array to either backend. */
+ * reuses the same five slots as code/range/pos, so one five-element array
+ * serves both directions exactly as hve/rc.py's two classes do. */
 typedef struct {
     int64_t s[5];
 } hve_rc;
@@ -92,8 +96,8 @@ typedef struct {
  * residual magnitudes, both of which fit in a byte, and `match_table` holds a
  * sample index. At 1080p that takes the match model's two random-access
  * working sets from 24 MB to 6 MB, which is the single largest speedup in this
- * file and is not something the numba path can express, since its arrays are
- * shared with the reference implementation's Python lists.
+ * file. The reference implementation cannot do the same, because its arrays are
+ * Python lists whose element type is not something it gets to choose.
  */
 typedef struct {
     int64_t *zero_p, *dir_p, *diff_p, *match_p, *sign_p, *nb_p, *nbm_p,

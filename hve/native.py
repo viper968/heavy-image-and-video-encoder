@@ -1,31 +1,30 @@
-"""Native C backend: the fastest of the three implementations of the codec.
+"""Native C backend: the path the codec actually runs on.
 
-The three paths, in the order the codec prefers them:
+There are two implementations of the core loop:
 
-    hve/native.py + csrc/   C, threaded motion search   this file
-    hve/fast.py             numba                       ~2x slower to encode
-    hve/model.py            pure Python                 the reference
+    hve/model.py            pure Python, the definition of the format
+    hve/native.py + csrc/   C, threaded motion search, ~100x faster
 
-All three must produce byte-identical streams. `model.py` remains the
-definition of the format; this file is an optimisation and nothing more, and
-tests/test_native.py fails the build rather than shipping a divergence.
+Both must produce byte-identical streams. `model.py` remains the definition;
+this file is an optimisation and nothing more, and tests/test_native.py fails
+rather than shipping a divergence.
 
 The library is compiled on first import with the system C compiler and cached
-next to the package. There is no build step to run and no compiler needed at
-install time — if `cc` is missing or the build fails, `available()` returns
-False and the codec silently uses the numba path instead, which is why nothing
-here raises on failure.
+next to the package, rebuilding whenever anything in csrc/ is newer. There is no
+build step to run — if `cc` is missing or the build fails, `available()` returns
+False and the codec falls back to the reference, which is why nothing here
+raises on failure. `HVE_NO_NATIVE=1` forces that fallback, and `HVE_THREADS`
+overrides the motion-search thread count.
 
-Two things this path does that numba cannot:
+Two things this path does that a Python implementation cannot:
 
   - It threads the motion search. Every block's search is independent, so this
     is a pure encoder-side win with no format implications. The pixel loop is
     still serial and still the floor on encode time; threading *that* needs the
     slice-independent format change described in docs/research.md.
-  - It narrows the scratch buffers. `fast.py` shares its arrays with the
-    reference implementation's Python lists and so carries everything as int64;
-    here the match model's two random-access tables are int32 and uint8, which
-    at 1080p is 6 MB of working set instead of 24 MB.
+  - It narrows the scratch buffers. The reference carries everything in Python
+    lists; here the match model's two random-access tables are int32 and uint8,
+    which at 1080p is 6 MB of working set instead of 24 MB.
 """
 
 import ctypes
@@ -44,10 +43,10 @@ _SOURCES = ("kernel.c", "motion.c")
 _HEADERS = ("hve.h",)
 
 # -fwrapv matters for correctness, not speed: signed overflow is undefined in C
-# but wraps in numba's int64, and the mixer weights are the kind of unbounded
-# accumulator where the two could differ. The kernel contains no floating point
-# at all, so -march=native changes instruction selection but cannot change a
-# single output byte — verified by hashing the stream both ways.
+# but Python's integers are arbitrary precision, and the mixer weights are the
+# kind of unbounded accumulator where the two could differ. The kernel contains
+# no floating point at all, so -march=native changes instruction selection but
+# cannot change a single output byte — verified by hashing the stream both ways.
 _BASE_CFLAGS = ["-fwrapv", "-fPIC", "-shared", "-pthread",
                 "-fno-strict-aliasing", "-std=c11"]
 # Tried in order; the first that compiles wins, so an older compiler or a
@@ -222,8 +221,8 @@ class Bank:
     """The adaptive state plus the scratch buffers, as arrays C can mutate.
 
     Sizes and initial values come from `model.new_model()` — the same call the
-    reference and numba paths use — so there is one definition of the model's
-    shape and this file cannot drift from it by forgetting to resize a table.
+    reference path uses — so there is one definition of the model's shape and
+    this file cannot drift from it by forgetting to resize a table.
     """
 
     def __init__(self, luma_h, luma_w, video=False):
@@ -255,8 +254,7 @@ class Bank:
         self.m.errmap_stride = luma_w
         self.stats = np.zeros(8, dtype=np.int64)
         self._set("stats", self.stats, _I64)
-        from . import fast
-        self.params = fast._params()
+        self.params = model.coder_params()
         self._set("params", self.params, _I64)
 
         if video:

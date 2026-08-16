@@ -243,12 +243,18 @@ and several of them can be *mixed* per bit rather than one being chosen.
    probabilities, no transmitted tables.
 
 `hve/model.py` is the readable reference implementation and the definition of
-the format. `hve/fast.py` is the same loop compiled by numba — covering both
-stills and video, including video's per-block prediction branch — used
-automatically when numba is installed. Keeping two implementations of a codec's
-core loop is exactly how formats get silently corrupted, so a test requires
-them to emit **byte-identical** bitstreams — drift fails loudly instead of
-quietly writing files only one path can read.
+the format. `csrc/kernel.c` is the same loop in C — covering both stills and
+video, including video's per-block prediction branch — built on first import
+and used automatically whenever a compiler is present. Keeping two
+implementations of a codec's core loop is exactly how formats get silently
+corrupted, so tests require them to emit **byte-identical** bitstreams; drift
+fails loudly instead of quietly writing files only one path can read.
+
+There was briefly a third, in numba. It was deleted once the C existed: every
+one of the five model changes in this repo's history had to be mirrored into it
+by hand, and it stopped adding any coverage the C-versus-reference check does
+not already give. That reasoning is in `docs/research.md`, because deciding
+*not* to keep an implementation is as much a result as writing one.
 
 **Video** (`hve/video.py`)
 
@@ -280,9 +286,10 @@ are coded at their native subsampled size.
   pixel depends on all prior ones. That is a property of the format, not of the
   implementation, and it is the remaining reason encode is ~10x slower than
   x264 rather than comparable. The C library is built automatically on first
-  import; without a compiler the codec falls back to numba (~2-4x slower) and
-  without numba to pure Python (~30x slower), producing identical bytes either
-  way. `tools/bench_image.py --jobs=N` parallelises across images, not within
+  import; without a compiler the codec falls back to the pure-Python reference,
+  which is roughly 100x slower and produces identical bytes. That fallback is a
+  correctness guarantee, not a usable mode — budget about a minute per Kodak
+  photo. `tools/bench_image.py --jobs=N` parallelises across images, not within
   one.
 - **JPEG XL still wins on stills** by 7.0% on held-out images. Nineteen
   techniques have been built and measured against that gap; eight are in and
@@ -310,10 +317,9 @@ hve/mix.py          logistic mixing + secondary estimation (stretch/squash, Mixe
 hve/model.py        weighted predictor, learned combiner, match model, context
                     model, residual binarisation — the readable reference,
                     shared by image+video
-hve/fast.py         the same loop compiled with numba, for stills and video
-                    alike, pinned byte-identical to model.py by tests
 hve/native.py       loads and binds the C backend; builds it on first import
-csrc/kernel.c       the same loop again, in C — the fastest of the three
+csrc/kernel.c       the same loop in C, for stills and video alike, pinned
+                    byte-identical to model.py by tests — this is what runs
 csrc/motion.c       threaded motion search (encoder only, no format impact)
 csrc/hve.h          shared structs, and the floor-division and shift helpers
                     that keep C's integer semantics matching Python's
@@ -335,15 +341,15 @@ playground/         setup + a friendly CLI for trying it on ordinary jpg/mp4
 docs/HANDOFF.md     start here: state, environment, workflow, what to do next
 docs/research.md    every technique surveyed and what it measured — including the
                     eight that were built and rejected
-tests/              73 tests: roundtrips, edge cases, coder internals, and
-                    byte-exactness between all three code paths
+tests/              72 tests: roundtrips, edge cases, coder internals, and
+                    byte-exactness between the C kernel and the reference
 ```
 
 ## Running it
 
 ```bash
-pip install numpy pillow                 # a C compiler makes it fastest; numba
-                                         # is the fallback, pure Python the floor
+pip install numpy pillow                 # plus a C compiler (cc/gcc/clang) for
+                                         # the fast path; pure Python otherwise
                                          # imagecodecs and pytest for benchmarks/tests
 python -m pytest tests -q
 python tools/fetch_testdata.py           # Kodak photos + Xiph clips (not committed)

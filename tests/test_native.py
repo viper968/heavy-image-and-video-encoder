@@ -1,13 +1,18 @@
-"""The native C backend must agree with the other two implementations exactly.
+"""The native C backend must agree with the reference implementation exactly.
 
-There are now three implementations of the codec's core loop — `hve/model.py`
-(the reference and the definition of the format), `hve/fast.py` (numba) and
-`csrc/` (C) — and a one-bit divergence between any two of them silently
-corrupts every file written by whichever happened to run. These tests are the
-only thing standing between that and shipping, so they compare bytes rather
-than sizes, and they use content that actually exercises the branches: odd
-dimensions, single rows and columns, subsampled chroma, real photographs and
-real clips.
+There are two implementations of the codec's core loop — `hve/model.py`, which
+is the definition of the format, and `csrc/kernel.c`, which is what actually
+runs — and a one-bit divergence between them silently corrupts every file
+written by whichever happened to run. These tests are the only thing standing
+between that and shipping, so they compare bytes rather than sizes.
+
+The awkward part is that the reference costs about 150 seconds per megapixel,
+so byte-identity is checked on inputs small enough to finish while still
+covering the branches that matter: odd dimensions, single rows and columns,
+the fourth plane kind, and subsampled chroma. Real photographs and real clips
+are then covered by roundtrip and invariant tests, which only need the fast
+path. Do not "improve" the byte-identity cases by enlarging them — the suite
+runs in seconds today and that is why it gets run.
 
 Run with: python -m pytest tests -q
 """
@@ -20,8 +25,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hve import fast, image, native, video, y4m           # noqa: E402
-from tests.test_codecs import synthetic                    # noqa: E402
+from hve import image, model, native, video, y4m          # noqa: E402
+from tests.test_codecs import _reference_payload, synthetic   # noqa: E402
 
 CLIPS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      "testdata", "video")
@@ -44,14 +49,17 @@ def _clip(name, limit=6):
 
 
 def _encode_both(frames):
-    """The same clip through the native and numba paths."""
+    """The same clip through the C kernel and through the pure-Python reference.
+
+    The reference is ~150s/megapixel, so callers must keep the frames tiny.
+    """
     real = native.available
     try:
         native.available = lambda: False
-        numba_bytes = video.encode(frames)
+        reference = video.encode(frames)
     finally:
         native.available = real
-    return video.encode(frames), numba_bytes
+    return video.encode(frames), reference
 
 
 # --------------------------------------------------------------------------
@@ -59,27 +67,29 @@ def _encode_both(frames):
 
 
 @pytest.mark.parametrize("shape", [(1, 1), (1, 40), (40, 1), (7, 9), (33, 51),
-                                   (64, 64), (17, 3)])
-def test_still_matches_numba_on_shapes(shape):
+                                   (17, 3)])
+def test_still_matches_the_reference_on_shapes(shape):
     """Odd sizes are where an off-by-one in the row buffers shows up."""
-    if not fast.available():
-        pytest.skip("numba not installed")
     h, w = shape
-    planes = np.random.default_rng(h * 1000 + w).integers(
-        0, 256, (3, h, w), dtype=np.uint8)
-    assert (native.encode_planes(planes)
-            == fast.encode_planes(planes.astype(np.int64)))
+    planes = np.ascontiguousarray(np.random.default_rng(h * 1000 + w).integers(
+        0, 256, (3, h, w), dtype=np.uint8))
+    assert native.encode_planes(planes) == _reference_payload(planes)
 
 
-def test_still_matches_numba_on_a_photograph():
-    if not fast.available():
-        pytest.skip("numba not installed")
+def test_still_matches_the_reference_on_a_photograph():
+    """Real photographic data, cropped to what the reference can finish."""
     from PIL import Image as PILImage
-    img = np.array(PILImage.open(PHOTO).convert("RGB"))
+    img = np.array(PILImage.open(PHOTO).convert("RGB"))[:40, :56]
     planes, _ = image._planes_from_image(img)
     planes = np.ascontiguousarray(planes, dtype=np.uint8)
-    assert (native.encode_planes(planes)
-            == fast.encode_planes(planes.astype(np.int64)))
+    assert native.encode_planes(planes) == _reference_payload(planes)
+
+
+def test_still_roundtrips_a_whole_photograph():
+    """The fast path alone, so this can use the full image."""
+    from PIL import Image as PILImage
+    img = np.array(PILImage.open(PHOTO).convert("RGB"))
+    assert np.array_equal(image.decode(image.encode(img)), img)
 
 
 @pytest.mark.parametrize("kind", ["flat", "random", "gradient", "extremes"])
@@ -101,35 +111,19 @@ def test_still_roundtrips(kind):
     assert np.array_equal(back, planes)
 
 
-def test_still_matches_the_pure_python_reference():
-    """Directly, not by transitivity through numba.
-
-    The other comparisons are native-vs-numba and numba-vs-reference, which only
-    chain if both run. This one pins the C path straight to the definition of
-    the format, on an image small enough for the reference loop to finish.
-    """
-    from tests.test_codecs import _reference_payload
-    planes = np.ascontiguousarray(synthetic(20, 26, 3).transpose(2, 0, 1))
-    assert native.encode_planes(planes) == _reference_payload(planes)
-
-
 def test_still_alpha_channel_uses_the_fourth_kind():
     """Four planes exercises kind 3, which three-channel content never reaches."""
-    if not fast.available():
-        pytest.skip("numba not installed")
     planes = np.ascontiguousarray(
-        np.random.default_rng(11).integers(0, 256, (4, 24, 29), dtype=np.uint8))
-    assert (native.encode_planes(planes)
-            == fast.encode_planes(planes.astype(np.int64)))
+        np.random.default_rng(11).integers(0, 256, (4, 20, 23), dtype=np.uint8))
+    assert native.encode_planes(planes) == _reference_payload(planes)
 
 
 # --------------------------------------------------------------------------
 # video
 
 
-def test_video_matches_numba_synthetic():
-    if not fast.available():
-        pytest.skip("numba not installed")
+def test_video_matches_the_reference():
+    """Subsampled chroma and the inter branch, at a size the reference survives."""
     base = [synthetic(32, 48, 1, seed=0), synthetic(16, 24, 1, seed=1),
             synthetic(16, 24, 1, seed=2)]
     frames = [[np.roll(p, i * 3, axis=1) for p in base] for i in range(4)]
@@ -137,13 +131,17 @@ def test_video_matches_numba_synthetic():
     assert got == want
 
 
-@pytest.mark.parametrize("clip", ["foreman_cif.y4m", "bus_cif.y4m"])
-def test_video_matches_numba_on_real_clips(clip):
-    """Real motion, real subsampled chroma, and the inter branch under load."""
-    if not fast.available():
-        pytest.skip("numba not installed")
-    frames = _clip(clip, limit=5)
-    got, want = _encode_both(frames)
+def test_video_matches_the_reference_on_a_real_clip_crop():
+    """Real motion rather than a synthetic roll, cropped so the reference finishes.
+
+    A crop of foreman keeps genuine sub-pixel head movement and real chroma,
+    which the rolled synthetic frames above do not have — a rolled frame has an
+    exact integer motion vector and never exercises the half-pel phases.
+    """
+    frames = _clip("foreman_cif.y4m", limit=3)
+    small = [[f[0][:32, :48].copy(), f[1][:16, :24].copy(), f[2][:16, :24].copy()]
+             for f in frames]
+    got, want = _encode_both(small)
     assert got == want
 
 
@@ -273,10 +271,12 @@ def test_threading_does_not_change_the_result():
 
 
 def test_container_output_is_backend_independent():
-    """A file written by one backend must be readable by the others."""
-    if not fast.available():
-        pytest.skip("numba not installed")
-    img = synthetic(40, 56, 3)
+    """A file written by the C backend must decode through the reference too.
+
+    This is the property a user actually depends on: a .hvi written on a machine
+    with a compiler has to open on one without.
+    """
+    img = synthetic(24, 32, 3)
     blob = image.encode(img)
     real = native.available
     try:
@@ -288,6 +288,6 @@ def test_container_output_is_backend_independent():
 
 
 def test_params_array_matches_the_c_enum():
-    """csrc/hve.h indexes `params` by a hand-written enum; keep them the same
-    length, since appending on one side only reads the wrong tunable."""
-    assert len(fast._params()) == 28
+    """csrc/hve.h indexes `params` by a hand-written enum, so a mismatch in
+    length means the C kernel is silently reading the wrong tunables."""
+    assert len(model.coder_params()) == 28

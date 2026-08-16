@@ -34,20 +34,15 @@ import numpy, PIL
 print("  numpy   ", numpy.__version__)
 print("  Pillow  ", PIL.__version__)
 
-try:
-    import numba
-    print("  numba   ", numba.__version__)
-except ImportError:
-    ok = False
-    print("  numba    MISSING - the codec will still work but ~30x slower")
-
 sys.path.insert(0, ".")
 from hve import native
 if native.available():
-    print("  C backend built (fastest path enabled)")
+    print("  C backend built (fast path enabled)")
 else:
-    print("  C backend UNAVAILABLE - falling back to numba.")
-    print("           reason:", native.load_error())
+    ok = False
+    print("  C backend FAILED TO BUILD - the codec still works but ~100x slower.")
+    print("           you need a C compiler (cc/gcc/clang); reason:")
+    print("          ", native.load_error())
 
 try:
     import imagecodecs

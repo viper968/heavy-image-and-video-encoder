@@ -8,9 +8,10 @@
 numpy
 Pillow
 
-# numba is what makes this usable rather than a demo. Without it the codec still
-# works and produces byte-identical output, roughly 30x slower.
-numba
+# There is deliberately no accelerator listed here. The fast path is C, built
+# from csrc/ on first import by whatever `cc` is on the machine, so it needs a
+# compiler rather than a package. Without one the codec still works and produces
+# byte-identical output, roughly 100x slower.
 
 # Only needed for `hve compare` (JPEG XL / WebP baselines) and the benchmarks in
 # tools/. Everything else runs without it.

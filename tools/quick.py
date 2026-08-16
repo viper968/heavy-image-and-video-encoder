@@ -1,7 +1,7 @@
 """Fast dev-set size measurement, for A/B-ing model changes.
 
 Encodes only — decode adds nothing to a size comparison — so a full dev-set
-reading takes a couple of seconds with the jitted path. Pass `test` to score the
+reading takes a couple of seconds with the compiled path. Pass `test` to score the
 held-out split instead, but only for a final number: tuning against it would
 defeat the point of holding it out.
 """
