@@ -6,3 +6,4 @@ testdata/
 .pytest_cache/
 
 .venv/
+playground/demo_output/

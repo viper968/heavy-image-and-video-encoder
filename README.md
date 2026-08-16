@@ -7,6 +7,16 @@ The output is not viewable in any normal viewer. That is the point: you send the
 compressed blob plus this decoder, and the other end gets the **exact original
 bytes** back — every pixel identical, verified on every benchmark run below.
 
+Just want to try it on your own files? `playground/README.md` — two commands
+from a fresh clone, and it handles ordinary jpg/mp4 input rather than only the
+PNG and .y4m the core CLI takes:
+
+```
+./playground/setup.sh
+./playground/hve demo
+./playground/hve check my_photo.jpg      # round trip, verifies every pixel
+```
+
 Picking this up to work on it? Read `docs/HANDOFF.md` first.
 
 ```
@@ -261,6 +271,8 @@ tools/quick.py      dev-set size reading in ~2s, the A/B harness for model work
 tools/corpus.py     the dev / held-out split, so tuning cannot flatter the results
 tools/headroom.py   ideal cost per predictor: is the gap in prediction or coding?
 tools/ctx_study.py, tools/pred_study.py, tools/tune.py   the design experiments
+playground/         setup + a friendly CLI for trying it on ordinary jpg/mp4
+                    files; nothing here is part of the codec
 docs/HANDOFF.md     start here: state, environment, workflow, what to do next
 docs/research.md    every technique surveyed and what it measured — including the
                     eight that were built and rejected

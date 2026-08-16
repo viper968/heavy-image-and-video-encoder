@@ -1,0 +1,15 @@
+#!/bin/sh
+# Thin wrapper so you never have to think about which python to run.
+#
+# The codec silently falls back to a ~30x slower pure-Python path when numba is
+# absent, which makes "did I use the right interpreter?" an easy and expensive
+# mistake. This always uses the project venv.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+if [ ! -x "$ROOT/.venv/bin/python" ]; then
+    echo "No .venv found. Run this first:" >&2
+    echo "    ./playground/setup.sh" >&2
+    exit 1
+fi
+
+exec "$ROOT/.venv/bin/python" "$ROOT/playground/try.py" "$@"

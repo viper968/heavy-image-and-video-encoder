@@ -1,0 +1,20 @@
+# Everything the playground needs, pinned to nothing in particular - these are
+# all stable APIs here and floating versions age better than a stale pin.
+#
+# Deliberately explicit rather than relying on --system-site-packages: the
+# machine this was developed on had numpy and Pillow installed system-wide, so
+# a venv that inherited them worked there and would have failed on a clean
+# clone anywhere else.
+numpy
+Pillow
+
+# numba is what makes this usable rather than a demo. Without it the codec still
+# works and produces byte-identical output, roughly 30x slower.
+numba
+
+# Only needed for `hve compare` (JPEG XL / WebP baselines) and the benchmarks in
+# tools/. Everything else runs without it.
+imagecodecs
+
+# Only needed to run the test suite.
+pytest
