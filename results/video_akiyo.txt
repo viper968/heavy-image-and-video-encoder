@@ -1,6 +1,6 @@
 akiyo_cif.y4m: 16 frames of 352x288, 2433024 raw bytes
 
-hve done (3.1s enc, 0.3s dec)
+hve done (3.3s enc, 0.4s dec)
 FFV1 (level 3) done
 x264 lossless done
 x265 lossless done
@@ -12,12 +12,12 @@ Ut Video done
 baselines: ffmpeg version 6.1.6 Copyright (c) 2000-2026 the FFmpeg developers
 
 codec                     bytes      ratio     enc s     dec s  verified
+hve                      317769      7.66x       3.3       0.4  lossless
 x264 lossless            321053      7.58x       0.1         -  lossless
 x265 lossless            323443      7.52x       1.1         -  lossless
-hve                      325399      7.48x       3.1       0.3  lossless
 AV1 lossless             329528      7.38x       0.6         -  lossless
 VP9 lossless             348041      6.99x       0.4         -  lossless
-FFV1 (level 3)           745942      3.26x       0.0         -  lossless
+FFV1 (level 3)           745942      3.26x       0.1         -  lossless
 Ut Video                1117097      2.18x       0.0         -  lossless
 FFVHuff                 1126272      2.16x       0.0         -  lossless
 

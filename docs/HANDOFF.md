@@ -5,7 +5,8 @@ then whichever of the three documents below matches what you are about to do.
 Update this file when the state it describes stops being true; a stale handoff
 is worse than none.
 
-**Last verified: commit `6ba47bd`, all 39 tests green.**
+**Last verified: the learned-combiner change on this branch, all 39 tests green,
+benchmarks in `results/` regenerated against it.**
 
 ## What this is
 
@@ -20,14 +21,14 @@ each colour channel) and the README tells that story with measurements.
 | document | what is in it | read it when |
 |---|---|---|
 | `README.md` | what the codec is, current benchmark tables, how it works, honest limitations | you need the current numbers or the architecture |
-| `docs/research.md` | **every technique tried, with its measured result** — including the eight that were rejected and why | before proposing any compression idea; most obvious ones have been tried |
+| `docs/research.md` | **every technique tried, with its measured result** — including the eleven that were rejected and why | before proposing any compression idea; most obvious ones have been tried |
 | `docs/HANDOFF.md` | this file: state, environment, workflow, what to do next | first |
 | `results/*.txt` | raw benchmark output, with the baseline library versions recorded | you doubt a number in the README |
 | `git log` | each commit message states what was measured and what was rejected | you want the reasoning behind a specific change |
 
 `docs/research.md` is the single most valuable file here. It contains primary-
 source algorithm details from libjxl, FLIF, CharLS, LPAQ and ZPAQ, and a table
-of what each idea was actually worth when implemented. **Eight techniques have
+of what each idea was actually worth when implemented. **Eleven techniques have
 been built and rejected on measurement.** Re-proposing one without reading that
 table wastes a session.
 
@@ -38,14 +39,17 @@ Held-out split, 18 Kodak images never used for tuning
 
 | codec | bytes | cpu s |
 |---|---:|---:|
-| JPEG XL effort 9 | 7,207,847 | 61.5 |
-| **hve** | **7,796,932** | **19.0** |
-| WebP lossless | 8,099,860 | 171.2 |
+| JPEG XL effort 9 | 7,207,847 | 63.9 |
+| **hve** | **7,711,460** | **23.6** |
+| WebP lossless | 8,099,860 | 175.9 |
 | PNG optimised | 11,321,001 | 6.0 |
 
-31.1% under PNG, 3.7% under lossless WebP, **8.2% over JPEG XL**, and faster
-than both of them. Video beats VP9 and AV1 on akiyo, loses to x264/x265/AV1 on
-foreman; see the README tables.
+31.9% under PNG, 4.8% under lossless WebP, **7.0% over JPEG XL**, and faster
+than both of them. Video now leads on akiyo (ahead of x264, x265, AV1 and VP9)
+and still loses to x264/AV1/x265 on foreman; see the README tables.
+
+Treat `cpu s` as approximate — a repeat run moved JPEG XL e9 from 63.9s to 77.9s
+on identical code. Byte counts are exact.
 
 Baseline sizes move when their libraries move — an earlier machine with libjxl
 0.11 put the gap at 6.9% with byte-identical hve output. Every benchmark prints
@@ -103,51 +107,70 @@ Gotchas that have already caused wrong measurements:
 - Context ordering matters: a context computed before the value it depends on
   will read the previous pixel's value. Check where in the loop your input is
   actually assigned.
+- Integer division must round identically in both paths. The learned combiner
+  divides by input energy, and rather than trust Python and numba to agree on
+  how a negative quotient floors, it takes the absolute value, divides, and
+  reapplies the sign. Do the same for any new division; `//` on a negative
+  numerator is the kind of thing that diverges silently on one platform.
+- The combiner reads a second row of history (`prev2`) that nothing else uses.
+  If you add state with a lifetime longer than one row, rotate it in both files
+  — `model.py` rebinds lists, `fast.py` copies arrays element by element.
+
+## What was just done
+
+The item this section used to point at — replace the error-weighted averaging
+blend with a learned combiner over many more predictors — **is built**. It is
+worth **1.10% held out**, closing the JPEG XL gap from 8.17% to 6.99%, and is
+about three times the size of any other single change in the log. `docs/research.md`
+has the full write-up under "The learned combiner".
+
+Two results from it are worth carrying forward, because both contradict what
+this document previously assumed:
+
+1. **The combiner is linear, so redundant inputs are worthless.** The first
+   build used seven inputs that were all linear combinations of the same four
+   neighbours and returned -0.013%. Swapping them for a real basis (the second
+   ring) plus two *nonlinear* predictors (MED, GAP) took the identical machinery
+   to -1.18%. Before adding a predictor, ask whether it is already inside the
+   span of the ones there.
+2. **The match model still wants a switch, not a weight.** Feeding the match
+   value into the combiner measured 0.15% worse, and 0.13% worse even with one
+   learned weight per match-length state. The old "an average is the problem"
+   framing was too broad: learned weights beat an average for predictors that
+   are *continuously somewhat-right*, and neither combiner suits a bimodal one.
 
 ## What to do next
 
-The remaining gap is **not** in the entropy coder or the binarisation, and this
-is measured rather than assumed. Counters in the encoder (`Bank.stats`) show
-that 74% of residuals are nonzero and that raw unmodelled bypass bits are only
-3.3% of the file. So:
+No single large item is identified any more. The honest options, roughly in
+order of expected value:
 
-- A better binarisation (hybrid-uint tokens) has a **3.3% ceiling**. Not worth
-  the rebuild.
-- The zero flag and sign bit are together about half the file, and for an
-  unbiased predictor the sign half is incompressible. That half only shrinks if
-  the residuals themselves shrink.
-
-Which leaves one real option, and it is a rebuild rather than an increment:
-
-**Replace the error-weighted averaging blend with a logistic mixer over many
-more predictors.** Four separate attempts to add predictors to the current
-average have come back negative — GAP, least squares, the match value, and the
-2W-WW / 2N-NN trend pair that paq8px rates highly. They fail identically, so
-the finding is about the combiner: an average is dragged by a volatile member
-even when down-weighted, while a mixer learns to ignore it. The match model
-only started paying when it stopped being a vote and became a hard switch.
-paq8px runs ~130 predictors into a real mixing network; this runs six into an
-average.
-
-Expect this to be a substantial piece of work in both `model.py` and
-`fast.py`, and expect the byte-exactness tests to be what keeps it honest.
-
-Smaller things that are genuinely still open:
-
-- Re-sweep the tuned constants. Several were fitted on 1-3 images back when a
-  full-corpus A/B cost 13 minutes; it now costs ~35s, so `tools/tune.py` can
-  run properly on the whole dev set.
-- Video encode is bounded by motion search (full search over ±8 in numpy), not
-  by coding. Attack the search if video encode speed matters.
-- Video's inter design is deliberately simple: one reference frame, full-pel
-  vectors, one block size, no bidirectional prediction. 8x8 blocks were
-  measured and were slightly worse.
+- **More nonlinear inputs to the combiner.** This is a falsifiable prediction
+  rather than a hunch: the linear span is now well covered, so further gains
+  should come only from predictors that are *not* weighted sums of neighbours
+  (a second GAP at a different threshold, a median-of-three, a texture-matched
+  value). If adding more linear neighbours does pay, the span argument above is
+  wrong and the whole section needs revisiting.
+- **Two combiners at different adaptation rates**, as paq8px runs six LMS
+  filters rather than one. The step-size sweep here has a single flat optimum,
+  which is what you would see if one rate is serving both smooth and busy
+  regions. Combining the two should be a mixer or a switch — on the evidence in
+  `research.md`, not an average.
+- **Re-sweep the tuned constants.** Several predate the combiner entirely, and
+  several were fitted on 1-3 images back when a full-corpus A/B cost 13 minutes;
+  it now costs ~3s, so `tools/tune.py` can run properly on the whole dev set.
+  The combiner's own constants were swept, but only one axis at a time.
+- **Sub-pixel motion and variable block sizes** for video. foreman is where the
+  remaining video loss lives, and it is a motion problem — the combiner improved
+  foreman by 2.2% and still left it 2.1% behind x264. Video encode is also
+  bounded by motion search (full search over ±8 in numpy), not by coding.
 
 ## Honest framing
 
-Every cheap contextual trick has now returned between 0.1% and 0.4%. Six of
-them stacked took the gap from 8.97% to 8.17%. Grinding out more of them will
-not close 8%, and saying otherwise would misrepresent the trend. Either commit
-to the mixer rebuild or bank the current position, which is a codec that is
-31% smaller than PNG, 3.7% smaller than lossless WebP, and faster than both of
-them and than JPEG XL.
+Before this change, every cheap contextual trick had returned 0.1-0.4% and six
+of them stacked moved the gap from 8.97% to 8.17%; the note here was that
+grinding out more would not close 8%. That was right, and the fix was
+architectural rather than incremental. The same caution now applies one level
+up: 7.0% will not close by adding a fourteenth predictor either. The current
+position is a codec 31.9% smaller than PNG, 4.8% smaller than lossless WebP,
+faster than both and than JPEG XL, and first on low-motion lossless video — and
+that is a perfectly good place to stop if the next idea is not a structural one.

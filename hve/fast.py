@@ -175,9 +175,14 @@ _dec_bypass = _jit(_dec_bypass)
 
 # Indices into the params array. Tunables are passed rather than closed over so
 # the parameter sweeps in tools/ can still move them at runtime.
+#
+# Append only. Inserting an entry shifts every index after it and silently
+# scrambles the model rather than failing.
 (P_NACT, P_NERR, P_NLUM, P_NSIDE, P_NDIFF, P_NMATCH, P_MAXNB, P_MATCHMAX,
  P_MATCHTRUST, P_WP1, P_WP2, P_WPSHIFT, P_W0, P_W1, P_W2, P_W3, P_HASHMASK,
- P_ADAPT, P_MVMAX) = range(19)
+ P_ADAPT, P_MVMAX,
+ P_LMSN, P_LMSWSHIFT, P_LMSRATE, P_LMSEPS, P_LMSSTEP, P_LMSWCLAMP,
+ P_NADJ, P_LMSACTSHIFT, P_LMSNDIR) = range(28)
 
 
 def _finish_encode(st, out):
@@ -245,8 +250,9 @@ def _code_block_info(encode, st, data, out, mode_p, mv_zero, mv_sign, mv_mag,
 
 def _code_plane1(encode, plane, data, out, st, params,
                  zero_p, dir_p, diff_p, match_p, sign_p, nb_p, nbm_p, mant_p,
-                 mixw, nbmixw, apm0, apm1, apm2, stretch, sq,
-                 act_l, err_l, lum_l, side_l, diff_l, mexp_l,
+                 conf_p, nbc_p,
+                 mixw, nbmixw, lmsw, apm0, apm1, apm2, stretch, sq,
+                 act_l, err_l, lum_l, side_l, diff_l, mexp_l, conf_l, adj_l,
                  match_table, flat, errmap, stats,
                  kind, use_luma, write_errmap,
                  inter_on, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref_plane):
@@ -271,6 +277,16 @@ def _code_plane1(encode, plane, data, out, st, params,
     wp_w3 = params[P_W3]
     hash_mask = params[P_HASHMASK]
     adapt = params[P_ADAPT]
+    lms_n = params[P_LMSN]
+    lms_wshift = params[P_LMSWSHIFT]
+    lms_rate = params[P_LMSRATE]
+    lms_eps = params[P_LMSEPS]
+    lms_step_clamp = params[P_LMSSTEP]
+    lms_wclamp = params[P_LMSWCLAMP]
+    nadj = params[P_NADJ]
+    lms_act_shift = params[P_LMSACTSHIFT]
+    lms_ndir = params[P_LMSNDIR]
+    nconf = conf_l.shape[0] + 1
 
     k_zero = kind * nact * nerr * nlum
     k_nb = kind * nact * nerr * (max_nb + 1)
@@ -286,8 +302,12 @@ def _code_plane1(encode, plane, data, out, st, params,
     kind_match = kind * nmatch
     kind_mix = kind * nact
     kind_nbapm = kind * (max_nb + 1) * nact
+    kind_lms = kind * (((nact + (1 << lms_act_shift) - 1) >> lms_act_shift)
+                       * lms_ndir * lms_n)
+    kind_conf = kind * nconf * nadj
 
     prev = np.zeros(width, dtype=np.int64)
+    prev2 = np.zeros(width, dtype=np.int64)
     cur = np.zeros(width, dtype=np.int64)
     prev_err = np.zeros(width, dtype=np.int64)
     cur_err = np.zeros(width, dtype=np.int64)
@@ -295,7 +315,8 @@ def _code_plane1(encode, plane, data, out, st, params,
     terr_cur = np.zeros(width + 2, dtype=np.int64)
     werr_prev = np.zeros((4, width + 2), dtype=np.int64)
     werr_cur = np.zeros((4, width + 2), dtype=np.int64)
-    ex = np.zeros(4, dtype=np.int64)
+    ex = np.zeros(5, dtype=np.int64)
+    lms_x = np.zeros(lms_n, dtype=np.int64)
     mode_x = np.zeros(width, dtype=np.int64)
     ref_y = np.zeros(width, dtype=np.int64)
     ref_x = np.zeros(width, dtype=np.int64)
@@ -342,15 +363,22 @@ def _code_plane1(encode, plane, data, out, st, params,
             q1 = 0
             q2 = 0
             q3 = 0
+            lms_on = False
+            lms_base_w = 0
+            lms_pred = 0
+            lms_adj = 0
+            energy = 0
             if first_row:
                 pred = 128 if x == 0 else west
                 act = 0
+                act_b = 0
                 sgn = 4
             else:
                 north = prev[x]
                 if x == 0:
                     pred = north
                     act = 0
+                    act_b = 0
                     sgn = 4
                 else:
                     nwest = prev[x - 1]
@@ -373,6 +401,7 @@ def _code_plane1(encode, plane, data, out, st, params,
                     d3 = ((north - neast + 128) & 255) - 128
                     act = ((d1 if d1 >= 0 else -d1) + (d2 if d2 >= 0 else -d2)
                            + (d3 if d3 >= 0 else -d3))
+                    act_b = _bisect_right(act_l, act)
                     sgn = ((0 if d1 < 0 else (1 if d1 == 0 else 2)) * 3
                            + (0 if d2 < 0 else (1 if d2 == 0 else 2)))
 
@@ -416,6 +445,68 @@ def _code_plane1(encode, plane, data, out, st, params,
                             blend = hi
                     pred = 255 if blend > 255 else (0 if blend < 0 else blend)
 
+                    wwest = cur[x - 2] if x >= 2 else west
+                    wwwest = cur[x - 3] if x >= 3 else wwest
+                    nwwest = prev[x - 2] if x >= 2 else nwest
+                    neeast = prev[x + 2] if x + 2 < width else neast
+                    if y >= 2:
+                        nnorth = prev2[x]
+                        nnwest = prev2[x - 1]
+                        nneast = prev2[x + 1] if x + 1 < width else nnorth
+                    else:
+                        nnorth = north
+                        nnwest = nwest
+                        nneast = neast
+
+                    dh = (abs(west - wwest) + abs(north - nwest)
+                          + abs(north - neast))
+                    dv = (abs(west - nwest) + abs(north - nnorth)
+                          + abs(neast - nneast))
+                    dd = dv - dh
+                    if dd > 80:
+                        gap = west
+                    elif dd < -80:
+                        gap = north
+                    else:
+                        gap = (west + north) // 2 + (neast - nwest) // 4
+                        if dd > 32:
+                            gap = (gap + west) // 2
+                        elif dd > 8:
+                            gap = (3 * gap + west) // 4
+                        elif dd < -32:
+                            gap = (gap + north) // 2
+                        elif dd < -8:
+                            gap = (3 * gap + north) // 4
+
+                    lms_x[0] = west - pred
+                    lms_x[1] = north - pred
+                    lms_x[2] = nwest - pred
+                    lms_x[3] = neast - pred
+                    lms_x[4] = wwest - pred
+                    lms_x[5] = nnorth - pred
+                    lms_x[6] = nnwest - pred
+                    lms_x[7] = nneast - pred
+                    lms_x[8] = q3 - pred
+                    lms_x[9] = gap - pred
+                    lms_x[10] = wwwest - pred
+                    lms_x[11] = nwwest - pred
+                    lms_x[12] = neeast - pred
+                    lms_base_w = kind_lms + (
+                        (act_b >> lms_act_shift) * lms_ndir
+                        + (0 if dd < -32 else (1 if dd <= 0 else
+                            (2 if dd <= 32 else 3)))) * lms_n
+                    acc = 0
+                    energy = lms_eps
+                    for i in range(lms_n):
+                        xi = lms_x[i]
+                        acc += lmsw[lms_base_w + i] * xi
+                        energy += xi * xi
+                    lms_adj = acc >> lms_wshift
+                    adj = pred + lms_adj
+                    pred = 255 if adj > 255 else (0 if adj < 0 else adj)
+                    lms_pred = pred
+                    lms_on = True
+
             if (not first_row) and x:
                 mhash = ((west * 0x2F0FD693 + north * 0x9E3779B1
                           + nwest * 0x85EBCA77 + neast * 0xC2B2AE3D)
@@ -447,7 +538,6 @@ def _code_plane1(encode, plane, data, out, st, params,
                 err_sum = west_err + north_err
                 if x + 1 < width:
                     err_sum += prev_err[x + 1]
-            act_b = _bisect_right(act_l, act)
             sub = act_b * nerr + _bisect_right(err_l, err_sum)
             lum = _bisect_right(lum_l, errmap[y, x]) if use_luma else 0
             zctx = b_zero + sub * nlum + lum
@@ -483,14 +573,20 @@ def _code_plane1(encode, plane, data, out, st, params,
                 ae = mexp if mexp >= 0 else -mexp
                 mexp_b = 1 + _bisect_right(mexp_l, ae)
 
+            conf_b = _bisect_right(conf_l, energy)
+            conf_ctx = (kind_conf + conf_b * nadj
+                        + _bisect_right(adj_l,
+                                        lms_adj if lms_adj >= 0 else -lms_adj))
             ex[0] = stretch[4095 - (zero_p[zctx] >> 3)]
             ex[1] = stretch[4095 - (dir_p[dir_ctx] >> 3)]
             ex[2] = stretch[4095 - (diff_p[diff_ctx] >> 3)]
             ex[3] = stretch[4095 - (match_p[match_ctx] >> 3)]
+            ex[4] = stretch[4095 - (conf_p[conf_ctx] >> 3)]
             mix_ctx = kind_mix + act_b
-            mbase = mix_ctx * 4
+            mbase = mix_ctx * 5
             dot = (ex[0] * mixw[mbase] + ex[1] * mixw[mbase + 1]
-                   + ex[2] * mixw[mbase + 2] + ex[3] * mixw[mbase + 3])
+                   + ex[2] * mixw[mbase + 2] + ex[3] * mixw[mbase + 3]
+                   + ex[4] * mixw[mbase + 4])
             pr_mix = _squash(sq, dot >> 16)
 
             s = stretch[pr_mix] + 2048
@@ -531,11 +627,14 @@ def _code_plane1(encode, plane, data, out, st, params,
             diff_p[diff_ctx] = (p - (p >> adapt)) if nonzero else (p + ((32768 - p) >> adapt))
             p = match_p[match_ctx]
             match_p[match_ctx] = (p - (p >> adapt)) if nonzero else (p + ((32768 - p) >> adapt))
+            p = conf_p[conf_ctx]
+            conf_p[conf_ctx] = (p - (p >> adapt)) if nonzero else (p + ((32768 - p) >> adapt))
             err = ((nonzero << 12) - pr_mix) * 7
             mixw[mbase] += (ex[0] * err + 0x8000) >> 16
             mixw[mbase + 1] += (ex[1] * err + 0x8000) >> 16
             mixw[mbase + 2] += (ex[2] * err + 0x8000) >> 16
             mixw[mbase + 3] += (ex[3] * err + 0x8000) >> 16
+            mixw[mbase + 4] += (ex[4] * err + 0x8000) >> 16
             target = 65535 if nonzero else 0
             apm0[aupd] += (target - apm0[aupd]) >> 7
             apm2[aupd3] += (target - apm2[aupd3]) >> 7
@@ -556,10 +655,13 @@ def _code_plane1(encode, plane, data, out, st, params,
                         ctx = nbbase + i
                         mixc = b_kind * (max_nb + 1) + i
                         mctx = mixc * 7 + mexp_b
+                        cctx = mixc * nconf + conf_b
                         nb0 = stretch[4095 - (nb_p[ctx] >> 3)]
                         nb1 = stretch[4095 - (nbm_p[mctx] >> 3)]
-                        nmb = mixc * 2
-                        ndot = nb0 * nbmixw[nmb] + nb1 * nbmixw[nmb + 1]
+                        nb2 = stretch[4095 - (nbc_p[cctx] >> 3)]
+                        nmb = mixc * 3
+                        ndot = (nb0 * nbmixw[nmb] + nb1 * nbmixw[nmb + 1]
+                                + nb2 * nbmixw[nmb + 2])
                         pr = _squash(sq, ndot >> 16)
                         pr_nbmix = pr
                         actx = kind_nbapm + i * nact + act_b
@@ -580,9 +682,13 @@ def _code_plane1(encode, plane, data, out, st, params,
                         p = nbm_p[mctx]
                         nbm_p[mctx] = ((p - (p >> adapt)) if more
                                        else (p + ((32768 - p) >> adapt)))
+                        p = nbc_p[cctx]
+                        nbc_p[cctx] = ((p - (p >> adapt)) if more
+                                       else (p + ((32768 - p) >> adapt)))
                         nerr2 = ((more << 12) - pr_nbmix) * 7
                         nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16
                         nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16
+                        nbmixw[nmb + 2] += (nb2 * nerr2 + 0x8000) >> 16
                         t2 = 65535 if more else 0
                         apm1[u2] += (t2 - apm1[u2]) >> 7
                     if nb >= 2:
@@ -602,10 +708,13 @@ def _code_plane1(encode, plane, data, out, st, params,
                         ctx = nbbase + nb
                         mixc = b_kind * (max_nb + 1) + nb
                         mctx = mixc * 7 + mexp_b
+                        cctx = mixc * nconf + conf_b
                         nb0 = stretch[4095 - (nb_p[ctx] >> 3)]
                         nb1 = stretch[4095 - (nbm_p[mctx] >> 3)]
-                        nmb = mixc * 2
-                        ndot = nb0 * nbmixw[nmb] + nb1 * nbmixw[nmb + 1]
+                        nb2 = stretch[4095 - (nbc_p[cctx] >> 3)]
+                        nmb = mixc * 3
+                        ndot = (nb0 * nbmixw[nmb] + nb1 * nbmixw[nmb + 1]
+                                + nb2 * nbmixw[nmb + 2])
                         pr = _squash(sq, ndot >> 16)
                         pr_nbmix = pr
                         actx = kind_nbapm + nb * nact + act_b
@@ -626,9 +735,13 @@ def _code_plane1(encode, plane, data, out, st, params,
                         p = nbm_p[mctx]
                         nbm_p[mctx] = ((p - (p >> adapt)) if more
                                        else (p + ((32768 - p) >> adapt)))
+                        p = nbc_p[cctx]
+                        nbc_p[cctx] = ((p - (p >> adapt)) if more
+                                       else (p + ((32768 - p) >> adapt)))
                         nerr2 = ((more << 12) - pr_nbmix) * 7
                         nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16
                         nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16
+                        nbmixw[nmb + 2] += (nb2 * nerr2 + 0x8000) >> 16
                         t2 = 65535 if more else 0
                         apm1[u2] += (t2 - apm1[u2]) >> 7
                         if not more:
@@ -649,6 +762,21 @@ def _code_plane1(encode, plane, data, out, st, params,
                 else:
                     mag = 0
                     value = pred & 255
+
+            if lms_on:
+                lerr = value - lms_pred
+                step = ((-lerr if lerr < 0 else lerr) << lms_wshift) // energy
+                if step > lms_step_clamp:
+                    step = lms_step_clamp
+                if lerr < 0:
+                    step = -step
+                for i in range(lms_n):
+                    wi = lmsw[lms_base_w + i] + ((step * lms_x[i]) >> lms_rate)
+                    if wi > lms_wclamp:
+                        wi = lms_wclamp
+                    elif wi < -lms_wclamp:
+                        wi = -lms_wclamp
+                    lmsw[lms_base_w + i] = wi
 
             if (not first_row) and x:
                 terr_cur[x + 1] = pred - value
@@ -680,6 +808,7 @@ def _code_plane1(encode, plane, data, out, st, params,
             for xx in range(width):
                 errmap[y, xx] = cur_err[xx]
         for xx in range(width):
+            prev2[xx] = prev[xx]
             prev[xx] = cur[xx]
             prev_err[xx] = cur_err[xx]
         for xx in range(width + 2):
@@ -714,11 +843,14 @@ def _params():
         model.WP_P1, model.WP_P2, model.WP_SHIFT,
         model.WP_MAXW[0], model.WP_MAXW[1], model.WP_MAXW[2], model.WP_MAXW[3],
         model.MATCH_HASH_MASK, rc.ADAPT_SHIFT, _video.MV_MAX,
+        model.LMS_NPRED, model.LMS_WSHIFT, model.LMS_RATE, model.LMS_EPS,
+        model.LMS_STEP_CLAMP, model.LMS_WCLAMP, model.NADJ,
+        model.LMS_ACT_SHIFT, model.LMS_NDIR,
     ], dtype=np.int64)
 
 
 _BANK_KEYS = ("zero", "zero_dir", "zero_diff", "zero_match", "sign", "nb",
-              "nb_match", "mant")
+              "nb_match", "mant", "zero_conf", "nb_conf")
 
 
 class Bank:
@@ -736,10 +868,12 @@ class Bank:
         self.apm0 = np.array(bank["zero_apm"].table, dtype=np.int64)
         self.apm1 = np.array(bank["nb_apm"].table, dtype=np.int64)
         self.apm2 = np.array(bank["zero_apm2"].table, dtype=np.int64)
+        self.lmsw = np.array(bank["lms"], dtype=np.int64)
         self.ladders = [np.array(x, dtype=np.int64) for x in
                         (model.ACT_LADDER, model.ERR_LADDER, model.LUMA_LADDER,
                          model.SIDE_LADDER, model.DIFF_LADDER,
-                         model.MEXP_LADDER)]
+                         model.MEXP_LADDER, model.CONF_LADDER,
+                         model.ADJ_LADDER)]
         self.tables = [np.array(mix.STRETCH, dtype=np.int64),
                        np.array(mix.SQUASH, dtype=np.int64)]
         self.match_table = np.zeros(model.MATCH_HASH_MASK + 1, dtype=np.int64)
@@ -763,7 +897,8 @@ class Bank:
         else:
             on, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref = inter
         _code_plane1(encode, plane, coder.data, coder.out, coder.st, self.params,
-                     *self.arrs, self.mixw, self.nbmixw, self.apm0, self.apm1, self.apm2, *self.tables,
+                     *self.arrs, self.mixw, self.nbmixw, self.lmsw,
+                     self.apm0, self.apm1, self.apm2, *self.tables,
                      *self.ladders, self.match_table, flat, errmap, self.stats,
                      kind, use_luma, write_errmap,
                      on, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref)
