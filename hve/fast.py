@@ -244,9 +244,9 @@ def _code_block_info(encode, st, data, out, mode_p, mv_zero, mv_sign, mv_mag,
 
 
 def _code_plane1(encode, plane, data, out, st, params,
-                 zero_p, dir_p, diff_p, match_p, sign_p, nb_p, mant_p,
-                 mixw, apm0, apm1, stretch, sq,
-                 act_l, err_l, lum_l, side_l, diff_l,
+                 zero_p, dir_p, diff_p, match_p, sign_p, nb_p, nbm_p, mant_p,
+                 mixw, nbmixw, apm0, apm1, stretch, sq,
+                 act_l, err_l, lum_l, side_l, diff_l, mexp_l,
                  match_table, flat, errmap,
                  kind, use_luma, write_errmap,
                  inter_on, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref_plane):
@@ -274,12 +274,12 @@ def _code_plane1(encode, plane, data, out, st, params,
 
     k_zero = kind * nact * nerr * nlum
     k_nb = kind * nact * nerr * (max_nb + 1)
-    k_sign = kind * 9
+    k_sign = kind * 9 * 4
     k_mant = kind * (max_nb + 1) * 2
     ikind = kind + 4
     i_zero = ikind * nact * nerr * nlum
     i_nb = ikind * nact * nerr * (max_nb + 1)
-    i_sign = ikind * 9
+    i_sign = ikind * 9 * 4
     i_mant = ikind * (max_nb + 1) * 2
     kind_dir = kind * 9 * nside * nside
     kind_diff = kind * ndiff * ndiff
@@ -333,6 +333,8 @@ def _code_plane1(encode, plane, data, out, st, params,
 
         for x in range(width):
             mval = -1
+            msign = 0
+            mexp_b = 0
             north = 0
             nwest = 0
             neast = 0
@@ -430,11 +432,13 @@ def _code_plane1(encode, plane, data, out, st, params,
                 b_nb = i_nb
                 b_sign = i_sign
                 b_mant = i_mant
+                b_kind = ikind
             else:
                 b_zero = k_zero
                 b_nb = k_nb
                 b_sign = k_sign
                 b_mant = k_mant
+                b_kind = kind
 
             north_err = 0 if first_row else prev_err[x]
             if first_row:
@@ -462,6 +466,7 @@ def _code_plane1(encode, plane, data, out, st, params,
                             + _bisect_right(diff_l, dne if dne >= 0 else -dne))
             if mval < 0:
                 match_ctx = kind_match
+                msign = 0
             else:
                 if mval == pred:
                     agree = 0
@@ -473,6 +478,10 @@ def _code_plane1(encode, plane, data, out, st, params,
                 match_ctx = kind_match + 1 + hit * 3 + agree
                 if match_len >= match_trust:
                     pred = mval
+                mexp = mval - pred
+                msign = 1 if mexp < 0 else (2 if mexp == 0 else 3)
+                ae = mexp if mexp >= 0 else -mexp
+                mexp_b = 1 + _bisect_right(mexp_l, ae)
 
             ex[0] = stretch[4095 - (zero_p[zctx] >> 3)]
             ex[1] = stretch[4095 - (dir_p[dir_ctx] >> 3)]
@@ -524,7 +533,7 @@ def _code_plane1(encode, plane, data, out, st, params,
 
             if encode:
                 if mag:
-                    _enc_bit(st, out, sign_p, b_sign + sgn, 1 if d < 0 else 0)
+                    _enc_bit(st, out, sign_p, b_sign + sgn * 4 + msign, 1 if d < 0 else 0)
                     v = mag - 1
                     nb = 0
                     t = v
@@ -535,7 +544,14 @@ def _code_plane1(encode, plane, data, out, st, params,
                     for i in range(limit + 1):
                         more = 1 if i < nb else 0
                         ctx = nbbase + i
-                        pr = 4095 - (nb_p[ctx] >> 3)
+                        mixc = b_kind * (max_nb + 1) + i
+                        mctx = mixc * 7 + mexp_b
+                        nb0 = stretch[4095 - (nb_p[ctx] >> 3)]
+                        nb1 = stretch[4095 - (nbm_p[mctx] >> 3)]
+                        nmb = mixc * 2
+                        ndot = nb0 * nbmixw[nmb] + nb1 * nbmixw[nmb + 1]
+                        pr = _squash(sq, ndot >> 16)
+                        pr_nbmix = pr
                         actx = kind_nbapm + i * nact + act_b
                         s2 = stretch[pr] + 2048
                         w2 = s2 & 127
@@ -551,6 +567,12 @@ def _code_plane1(encode, plane, data, out, st, params,
                         p = nb_p[ctx]
                         nb_p[ctx] = ((p - (p >> adapt)) if more
                                      else (p + ((32768 - p) >> adapt)))
+                        p = nbm_p[mctx]
+                        nbm_p[mctx] = ((p - (p >> adapt)) if more
+                                       else (p + ((32768 - p) >> adapt)))
+                        nerr2 = ((more << 12) - pr_nbmix) * 7
+                        nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16
+                        nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16
                         t2 = 65535 if more else 0
                         apm1[u2] += (t2 - apm1[u2]) >> 7
                     if nb >= 2:
@@ -563,11 +585,18 @@ def _code_plane1(encode, plane, data, out, st, params,
                 value = (pred + d) & 255
             else:
                 if nonzero:
-                    neg = _dec_bit(st, data, sign_p, b_sign + sgn)
+                    neg = _dec_bit(st, data, sign_p, b_sign + sgn * 4 + msign)
                     nb = 0
                     while nb < max_nb:
                         ctx = nbbase + nb
-                        pr = 4095 - (nb_p[ctx] >> 3)
+                        mixc = b_kind * (max_nb + 1) + nb
+                        mctx = mixc * 7 + mexp_b
+                        nb0 = stretch[4095 - (nb_p[ctx] >> 3)]
+                        nb1 = stretch[4095 - (nbm_p[mctx] >> 3)]
+                        nmb = mixc * 2
+                        ndot = nb0 * nbmixw[nmb] + nb1 * nbmixw[nmb + 1]
+                        pr = _squash(sq, ndot >> 16)
+                        pr_nbmix = pr
                         actx = kind_nbapm + nb * nact + act_b
                         s2 = stretch[pr] + 2048
                         w2 = s2 & 127
@@ -583,6 +612,12 @@ def _code_plane1(encode, plane, data, out, st, params,
                         p = nb_p[ctx]
                         nb_p[ctx] = ((p - (p >> adapt)) if more
                                      else (p + ((32768 - p) >> adapt)))
+                        p = nbm_p[mctx]
+                        nbm_p[mctx] = ((p - (p >> adapt)) if more
+                                       else (p + ((32768 - p) >> adapt)))
+                        nerr2 = ((more << 12) - pr_nbmix) * 7
+                        nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16
+                        nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16
                         t2 = 65535 if more else 0
                         apm1[u2] += (t2 - apm1[u2]) >> 7
                         if not more:
@@ -671,7 +706,8 @@ def _params():
     ], dtype=np.int64)
 
 
-_BANK_KEYS = ("zero", "zero_dir", "zero_diff", "zero_match", "sign", "nb", "mant")
+_BANK_KEYS = ("zero", "zero_dir", "zero_diff", "zero_match", "sign", "nb",
+              "nb_match", "mant")
 
 
 class Bank:
@@ -685,11 +721,13 @@ class Bank:
         bank = model.new_model()
         self.arrs = [np.array(bank[k], dtype=np.int64) for k in _BANK_KEYS]
         self.mixw = np.array(bank["zero_mix"].weights, dtype=np.int64)
+        self.nbmixw = np.array(bank["nb_mix"].weights, dtype=np.int64)
         self.apm0 = np.array(bank["zero_apm"].table, dtype=np.int64)
         self.apm1 = np.array(bank["nb_apm"].table, dtype=np.int64)
         self.ladders = [np.array(x, dtype=np.int64) for x in
                         (model.ACT_LADDER, model.ERR_LADDER, model.LUMA_LADDER,
-                         model.SIDE_LADDER, model.DIFF_LADDER)]
+                         model.SIDE_LADDER, model.DIFF_LADDER,
+                         model.MEXP_LADDER)]
         self.tables = [np.array(mix.STRETCH, dtype=np.int64),
                        np.array(mix.SQUASH, dtype=np.int64)]
         self.match_table = np.zeros(model.MATCH_HASH_MASK + 1, dtype=np.int64)
@@ -711,7 +749,7 @@ class Bank:
         else:
             on, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref = inter
         _code_plane1(encode, plane, coder.data, coder.out, coder.st, self.params,
-                     *self.arrs, self.mixw, self.apm0, self.apm1, *self.tables,
+                     *self.arrs, self.mixw, self.nbmixw, self.apm0, self.apm1, *self.tables,
                      *self.ladders, self.match_table, flat, errmap,
                      kind, use_luma, write_errmap,
                      on, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref)

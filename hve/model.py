@@ -41,6 +41,16 @@ NDIFF = len(DIFF_LADDER) + 1
 SIDE_LADDER = [1, 2, 4, 8]                     # 5 buckets per axis
 NSIDE = len(SIDE_LADDER) + 1
 ZERO_EXPERTS = 4
+# When a match exists but has not yet earned the right to replace the
+# prediction, it still has an opinion about the residual: mval - pred. The sign
+# bit used to ignore that entirely.
+NMSIGN = 4
+# The match also has an opinion about the residual's magnitude. Splitting the
+# length-bin contexts on it was measured and lost to dilution, so it enters as
+# a second expert to be mixed instead - mixing combines predictions where
+# splitting divides the data.
+MEXP_LADDER = [0, 1, 3, 7, 15]
+NMEXP = len(MEXP_LADDER) + 2      # 0 means 'no match at all'
 
 # Match model. Every other expert reads the same handful of adjacent pixels, so
 # they mostly agree and mixing them pays little. This one looks somewhere else
@@ -95,8 +105,10 @@ def new_model():
         "zero_diff": rc.new_probs(KINDS * NDIFF * NDIFF),
         # Expert 4: the match model.
         "zero_match": rc.new_probs(KINDS * NMATCH),
-        "sign": rc.new_probs(KINDS * 9),
+        "sign": rc.new_probs(KINDS * 9 * NMSIGN),
         "nb": rc.new_probs(KINDS * NACT * NERR * (MAX_NB + 1)),
+        "nb_match": rc.new_probs(KINDS * (MAX_NB + 1) * NMEXP),
+        "nb_mix": mix.Mixer(2, KINDS * (MAX_NB + 1)),
         "mant": rc.new_probs(KINDS * (MAX_NB + 1) * 2),
         "zero_mix": mix.Mixer(ZERO_EXPERTS, KINDS * NACT),
         "zero_apm": mix.APM(KINDS * NACT),
@@ -121,7 +133,7 @@ def _adapt(probs, ctx, bit):
 def kind_offsets(kind):
     return (kind * NACT * NERR * NLUM,
             kind * NACT * NERR * (MAX_NB + 1),
-            kind * 9,
+            kind * 9 * NMSIGN,
             kind * (MAX_NB + 1) * 2)
 
 
@@ -159,6 +171,8 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
     match_p = model["zero_match"]
     sign_p = model["sign"]
     nb_p = model["nb"]
+    nbm_p = model["nb_match"]
+    nb_mix = model["nb_mix"]
     mant_p = model["mant"]
     zero_mix = model["zero_mix"]
     zero_apm = model["zero_apm"]
@@ -322,8 +336,10 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
             if inter is not None and mode_x[x]:
                 pred = ref_row_of_x[x][ref_col_of_x[x]]
                 b_zero, b_nb, b_sign, b_mant = i_zero, i_nb, i_sign, i_mant
+                b_kind = kind + INTER_KIND_OFFSET
             else:
                 b_zero, b_nb, b_sign, b_mant = k_zero, k_nb, k_sign, k_mant
+                b_kind = kind
 
             north_err = 0 if first_row else prev_err[x]
             if first_row:
@@ -350,12 +366,17 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                             + bisect_right(diff_ladder, dne if dne >= 0 else -dne))
             if mval < 0:
                 match_ctx = kind_match
+                msign = 0
+                mexp_b = 0
             else:
                 agree = 0 if mval == pred else (1 if -3 < mval - pred < 3 else 2)
                 hit = match_len if match_len < MATCH_MAX_LEN else MATCH_MAX_LEN
                 match_ctx = kind_match + 1 + hit * 3 + agree
                 if match_len >= MATCH_TRUST:
                     pred = mval
+                mexp = mval - pred
+                msign = 1 if mexp < 0 else (2 if mexp == 0 else 3)
+                mexp_b = 1 + bisect_right(MEXP_LADDER, mexp if mexp >= 0 else -mexp)
 
             experts = [stretch_t[4095 - (zero_p[zctx] >> 3)],
                        stretch_t[4095 - (dir_p[dir_ctx] >> 3)],
@@ -382,14 +403,17 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 zero_mix.update(nonzero)
                 zero_apm.update(nonzero)
                 if mag:
-                    bit(sign_p, b_sign + sgn, 1 if d < 0 else 0)
+                    bit(sign_p, b_sign + sgn * NMSIGN + msign, 1 if d < 0 else 0)
                     v = mag - 1
                     nb = v.bit_length()
                     limit = nb if nb < MAX_NB else nb - 1
                     for i in range(limit + 1):
                         more = 1 if i < nb else 0
                         ctx = nbbase + i
-                        pr = 4095 - (nb_p[ctx] >> 3)
+                        mixc = b_kind * (MAX_NB + 1) + i
+                        mctx = mixc * NMEXP + mexp_b
+                        pr = nb_mix.mix([stretch_t[4095 - (nb_p[ctx] >> 3)],
+                                         stretch_t[4095 - (nbm_p[mctx] >> 3)]], mixc)
                         actx = kind_nbapm + i * NACT + act_b
                         pr = (pr + 3 * nb_apm.refine(pr, actx)) >> 2
                         if pr < 1:
@@ -398,6 +422,8 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                             pr = 4095
                         coder.bit_p((4096 - pr) << 3, more)
                         _adapt(nb_p, ctx, more)
+                        _adapt(nbm_p, mctx, more)
+                        nb_mix.update(more)
                         nb_apm.update(more)
                     if nb >= 2:
                         bit(mant_p, b_mant + nb * 2, (v >> (nb - 2)) & 1)
@@ -415,11 +441,14 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 zero_mix.update(nonzero)
                 zero_apm.update(nonzero)
                 if nonzero:
-                    neg = bit(sign_p, b_sign + sgn)
+                    neg = bit(sign_p, b_sign + sgn * NMSIGN + msign)
                     nb = 0
                     while nb < MAX_NB:
                         ctx = nbbase + nb
-                        pr = 4095 - (nb_p[ctx] >> 3)
+                        mixc = b_kind * (MAX_NB + 1) + nb
+                        mctx = mixc * NMEXP + mexp_b
+                        pr = nb_mix.mix([stretch_t[4095 - (nb_p[ctx] >> 3)],
+                                         stretch_t[4095 - (nbm_p[mctx] >> 3)]], mixc)
                         actx = kind_nbapm + nb * NACT + act_b
                         pr = (pr + 3 * nb_apm.refine(pr, actx)) >> 2
                         if pr < 1:
@@ -428,6 +457,8 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                             pr = 4095
                         more = coder.bit_p((4096 - pr) << 3)
                         _adapt(nb_p, ctx, more)
+                        _adapt(nbm_p, mctx, more)
+                        nb_mix.update(more)
                         nb_apm.update(more)
                         if not more:
                             break
