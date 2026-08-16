@@ -164,24 +164,30 @@ tree* rather than a fixed grid:
   beats the actual context by a threshold, the leaf splits on that property.
   The tree is transmitted.
 
-That was built here and did not pay (above). What is left, in the order I would
-try it:
+That was built here and did not pay (above). Of the list that followed it,
+three have since been done and one has been costed out:
 
-1. **Condition the sign and magnitude bins on the match too.** The match model
-   now replaces the prediction when it is confident, but when it is only
-   *fairly* confident its answer still implies an expected residual, and the
-   sign and magnitude bins currently ignore that entirely. This is the same
-   mistake the expert-only version made, one level down.
-2. **A longer-range model** reaching several rows up, and more predictors
-   generally — paq8px carries ~130 for this reason.
-3. **Mixing on the magnitude bins**, not just secondary estimation. The bins
-   currently have one context model each; they are the second largest cost in
-   the file.
-4. **A second mixing layer**, which every serious context-mixing compressor
-   has and which no source I found isolates a number for.
-5. **The hybrid-uint token design** — give small residuals their own jointly
-   modelled symbol instead of decomposing every one into is-zero / sign /
-   unary. Structurally strictly stronger than the current binarisation.
+- ~~Condition the sign and magnitude bins on the match~~ — **done**, -0.42%
+  combined, and the two halves of it are the clearest illustration in this
+  document of mixing beating splitting.
+- ~~Mixing on the magnitude bins~~ — **done** as part of the above.
+- ~~A second secondary-estimation stage~~ — **done**, -0.09%.
+- ~~Hybrid-uint tokens~~ — **not worth building**: the bit budget below shows
+  raw bypass bits are 3.3% of the file, which is the entire ceiling for any
+  binarisation change, and a redesign would capture only part of it.
+
+What is genuinely left is one item, and it is large:
+
+**A proper mixing network over many more predictors.** paq8px runs ~130 into a
+real mixer. This codec runs six into an *error-weighted average*, and four
+separate attempts to add predictors to that average have now come back negative
+(GAP, least squares, the match value, and the 2W-WW / 2N-NN trend pair). They
+fail the same way each time, so the finding is about the combiner and not about
+any individual predictor: an average is dragged by a volatile member even when
+that member is down-weighted, whereas a logistic mixer learns to ignore it. The
+match model itself only started paying when it stopped being a vote and became a
+hard switch. Replacing the blend with a mixer is the one change consistent with
+every negative result here, and it is a rebuild rather than an increment.
 
 ## Where the bits actually go
 

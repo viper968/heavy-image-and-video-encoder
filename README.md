@@ -7,6 +7,8 @@ The output is not viewable in any normal viewer. That is the point: you send the
 compressed blob plus this decoder, and the other end gets the **exact original
 bytes** back — every pixel identical, verified on every benchmark run below.
 
+Picking this up to work on it? Read `docs/HANDOFF.md` first.
+
 ```
 python -m hve encode photo.png photo.hvi
 python -m hve decode photo.hvi restored.png     # byte-identical pixels
@@ -192,11 +194,12 @@ are coded at their native subsampled size.
   --jobs=N` parallelises across images, not within one. Without numba the codec
   still works, just at the original speed. The algorithms are all O(pixels) — the constant is Python. A C port
   would land in the same class as the codecs it is compared against.
-- **JPEG XL still wins on stills** by 8.2% on held-out images. Context mixing,
-  secondary estimation, a self-correcting weighted predictor and an online
-  learned context tree were all built and measured against that gap; the first
-  three are in, the fourth was not worth its cost. See `docs/research.md` for
-  every number, including the techniques that made things *worse*.
+- **JPEG XL still wins on stills** by 8.2% on held-out images. Fourteen
+  techniques have been built and measured against that gap; six are in and
+  eight were rejected, several of them ideas the literature rates highly.
+  Instrumenting the encoder shows the remaining gap is in prediction, not in
+  the entropy coder or the binarisation — raw unmodelled bits are only 3.3% of
+  the file. `docs/research.md` has every number and every reason.
 - **Video uses only the previous frame**, full-pel motion, one block size, and
   no bidirectional prediction. x264's lossless mode remains slightly ahead, and
   on high-motion content the margin is wider (see `results/video_foreman.txt`).
@@ -224,11 +227,13 @@ hve/y4m.py          YUV4MPEG2 reader/writer
 hve/cli.py          command line interface
 tools/ladder.py     measures every rung from Huffman to the final codec
 tools/bench_image.py, tools/bench_video.py    benchmarks with losslessness verified
+tools/quick.py      dev-set size reading in ~2s, the A/B harness for model work
 tools/corpus.py     the dev / held-out split, so tuning cannot flatter the results
 tools/headroom.py   ideal cost per predictor: is the gap in prediction or coding?
 tools/ctx_study.py, tools/pred_study.py, tools/tune.py   the design experiments
+docs/HANDOFF.md     start here: state, environment, workflow, what to do next
 docs/research.md    every technique surveyed and what it measured — including the
-                    ones that made things worse
+                    eight that were built and rejected
 tests/              39 tests: roundtrips, edge cases, coder internals,
                     and byte-exactness between the two code paths
 ```
