@@ -324,11 +324,12 @@ def test_video_static_scene_is_tiny():
 
 
 def test_motion_search_finds_shift():
+    """Vectors are in half-pel units, so a 4-pixel shift reads as -8."""
     ref = synthetic(64, 64, 1, seed=3)
     cur = np.roll(ref, (0, 4), axis=(0, 1))
     mvs, _ = video.motion_search(cur, ref)
     interior = mvs[1:-1, 1:-1]
-    assert (interior[..., 1] == -4).mean() > 0.7
+    assert (interior[..., 1] == -8).mean() > 0.7
 
 
 def test_video_block_size_travels_in_the_header():

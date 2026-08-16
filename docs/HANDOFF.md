@@ -5,8 +5,8 @@ then whichever of the three documents below matches what you are about to do.
 Update this file when the state it describes stops being true; a stale handoff
 is worse than none.
 
-**Last verified: the learned-combiner change on this branch, all 39 tests green,
-benchmarks in `results/` regenerated against it.**
+**Last verified: half-pel motion vectors, all 39 tests green, benchmarks in
+`results/` regenerated against it.**
 
 ## What this is
 
@@ -21,15 +21,15 @@ each colour channel) and the README tells that story with measurements.
 | document | what is in it | read it when |
 |---|---|---|
 | `README.md` | what the codec is, current benchmark tables, how it works, honest limitations | you need the current numbers or the architecture |
-| `docs/research.md` | **every technique tried, with its measured result** — including the eleven that were rejected and why | before proposing any compression idea; most obvious ones have been tried |
+| `docs/research.md` | **every technique tried, with its measured result** — including the fifteen that were rejected and why | before proposing any compression idea; most obvious ones have been tried |
 | `docs/HANDOFF.md` | this file: state, environment, workflow, what to do next | first |
 | `results/*.txt` | raw benchmark output, with the baseline library versions recorded | you doubt a number in the README |
 | `git log` | each commit message states what was measured and what was rejected | you want the reasoning behind a specific change |
 
 `docs/research.md` is the single most valuable file here. It contains primary-
 source algorithm details from libjxl, FLIF, CharLS, LPAQ and ZPAQ, and a table
-of what each idea was actually worth when implemented. **Eleven techniques have
-been built and rejected on measurement.** Re-proposing one without reading that
+of what each idea was actually worth when implemented. **Fifteen techniques have
+been built or costed and then rejected on measurement.** Re-proposing one without reading that
 table wastes a session.
 
 ## Current standing
@@ -45,8 +45,9 @@ Held-out split, 18 Kodak images never used for tuning
 | PNG optimised | 11,321,001 | 6.0 |
 
 31.9% under PNG, 4.8% under lossless WebP, **7.0% over JPEG XL**, and faster
-than both of them. Video now leads on akiyo (ahead of x264, x265, AV1 and VP9)
-and still loses to x264/AV1/x265 on foreman; see the README tables.
+than both of them. Video now leads x264, x265, AV1 and VP9 on **both** test
+clips — akiyo 317,074 and foreman 837,709, the latter 1.0% ahead of x264. See
+the README tables.
 
 Treat `cpu s` as approximate — a repeat run moved JPEG XL e9 from 63.9s to 77.9s
 on identical code. Byte counts are exact.
@@ -61,10 +62,13 @@ without checking them.
 Python here is PEP 668-managed, so everything runs from the project venv:
 
 ```bash
-python3 -m venv --system-site-packages .venv
-.venv/bin/pip install numba imagecodecs pytest
-.venv/bin/python tools/fetch_testdata.py     # 24 Kodak images + 2 Xiph clips, ~100MB
+./playground/setup.sh                        # venv + every dependency, explicitly
+.venv/bin/python tools/fetch_testdata.py     # 24 Kodak images + 5 Xiph clips, ~200MB
 ```
+
+Do **not** create the venv with `--system-site-packages`, which is what this
+file used to say. It worked only because the original machine had numpy and
+Pillow installed system-wide, and it fails on a clean clone.
 
 - `testdata/` and `.venv/` are gitignored. Benchmarks need both.
 - Run everything as `.venv/bin/python`. Bare `python3` lacks numba and
@@ -115,17 +119,29 @@ Gotchas that have already caused wrong measurements:
 - The combiner reads a second row of history (`prev2`) that nothing else uses.
   If you add state with a lifetime longer than one row, rotate it in both files
   — `model.py` rebinds lists, `fast.py` copies arrays element by element.
+- Motion vectors are in **half-pel** units. A vector splits into `d >> 1` whole
+  pixels and a phase of `d & 1` indexing four interpolated reference planes,
+  and the shift must stay arithmetic so negative vectors floor to the correct
+  side. Chroma divides the luma vector by its subsampling factor *first*.
+  Anything that reads `mvs` and forgets the units is off by a factor of two.
 
 ## What was just done
 
-The item this section used to point at — replace the error-weighted averaging
-blend with a learned combiner over many more predictors — **is built**. It is
-worth **1.10% held out**, closing the JPEG XL gap from 8.17% to 6.99%, and is
-about three times the size of any other single change in the log. `docs/research.md`
-has the full write-up under "The learned combiner".
+Two rounds, both of which closed items this file used to name as open.
 
-Two results from it are worth carrying forward, because both contradict what
-this document previously assumed:
+**The learned combiner** replaced the error-weighted averaging blend: **1.10%
+held out** on stills, closing the JPEG XL gap from 8.17% to 6.99%. See "The
+learned combiner" in `docs/research.md`.
+
+**Half-pel motion vectors** for video: **2.3% held out**, and 3.05% on foreman
+alone, which took that clip from fourth place to first. Together with the
+combiner, video now leads x264, x265, AV1 and VP9 on both test clips. Three
+other motion ideas were costed and rejected in the same round — see "Motion
+modelling" in `docs/research.md`, and note that two of them were killed by a
+numpy proxy in about a minute each, without being built.
+
+Two results from the combiner are worth carrying forward, because both
+contradict what this document previously assumed:
 
 1. **The combiner is linear, so redundant inputs are worthless.** The first
    build used seven inputs that were all linear combinations of the same four
@@ -159,10 +175,10 @@ order of expected value:
   several were fitted on 1-3 images back when a full-corpus A/B cost 13 minutes;
   it now costs ~3s, so `tools/tune.py` can run properly on the whole dev set.
   The combiner's own constants were swept, but only one axis at a time.
-- **Sub-pixel motion and variable block sizes** for video. foreman is where the
-  remaining video loss lives, and it is a motion problem — the combiner improved
-  foreman by 2.2% and still left it 2.1% behind x264. Video encode is also
-  bounded by motion search (full search over ±8 in numpy), not by coding.
+- **Multiple reference frames or bidirectional prediction** for video, neither
+  of which has been costed. Half-pel vectors are done (-2.3% held out) and
+  variable block sizes were measured and rejected, so the two items this section
+  used to name are closed. Video encode is still bounded by motion search.
 
 ## Honest framing
 

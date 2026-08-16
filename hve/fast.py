@@ -212,14 +212,50 @@ def _code_mv(encode, st, data, out, mv_zero, mv_sign, mv_mag, axis, mv_max, valu
     return -mag if neg else mag
 
 
+def _median3(a, b, c):
+    lo = a if a < b else b
+    lo = lo if lo < c else c
+    hi = a if a > b else b
+    hi = hi if hi > c else c
+    return a + b + c - lo - hi
+
+
+def _mv_predictor(mvs, by, bx, nbx):
+    """Mirror of video.mv_predictor - median of left, above, above-right."""
+    if by == 0:
+        if bx == 0:
+            return 0, 0
+        return mvs[0, bx - 1, 0], mvs[0, bx - 1, 1]
+    if bx > 0:
+        ly = mvs[by, bx - 1, 0]
+        lx = mvs[by, bx - 1, 1]
+    else:
+        ly = 0
+        lx = 0
+    uy = mvs[by - 1, bx, 0]
+    ux = mvs[by - 1, bx, 1]
+    if bx + 1 < nbx:
+        ry = mvs[by - 1, bx + 1, 0]
+        rx = mvs[by - 1, bx + 1, 1]
+    elif bx > 0:
+        ry = mvs[by - 1, bx - 1, 0]
+        rx = mvs[by - 1, bx - 1, 1]
+    else:
+        ry = 0
+        rx = 0
+    return _median3(ly, uy, ry), _median3(lx, ux, rx)
+
+
+_median3 = _jit(_median3)
+_mv_predictor = _jit(_mv_predictor)
+
+
 def _code_block_info(encode, st, data, out, mode_p, mv_zero, mv_sign, mv_mag,
                      modes, mvs, mv_max):
-    """Per-block modes and motion vectors, differential against the left block."""
+    """Per-block modes and motion vectors, against the median predictor."""
     nby = modes.shape[0]
     nbx = modes.shape[1]
     for by in range(nby):
-        pred_y = 0
-        pred_x = 0
         for bx in range(nbx):
             left = modes[by, bx - 1] if bx else 0
             up = modes[by - 1, bx] if by else 0
@@ -229,6 +265,7 @@ def _code_block_info(encode, st, data, out, mode_p, mv_zero, mv_sign, mv_mag,
             else:
                 modes[by, bx] = _dec_bit(st, data, mode_p, ctx)
             if modes[by, bx] == 1:
+                pred_y, pred_x = _mv_predictor(mvs, by, bx, nbx)
                 if encode:
                     _code_mv(True, st, data, out, mv_zero, mv_sign, mv_mag, 0,
                              mv_max, mvs[by, bx, 0] - pred_y)
@@ -241,11 +278,6 @@ def _code_block_info(encode, st, data, out, mode_p, mv_zero, mv_sign, mv_mag,
                                   mv_max, 0)
                     mvs[by, bx, 0] = dy + pred_y
                     mvs[by, bx, 1] = dx + pred_x
-                pred_y = mvs[by, bx, 0]
-                pred_x = mvs[by, bx, 1]
-            else:
-                pred_y = 0
-                pred_x = 0
 
 
 def _code_plane1(encode, plane, data, out, st, params,
@@ -320,6 +352,7 @@ def _code_plane1(encode, plane, data, out, st, params,
     mode_x = np.zeros(width, dtype=np.int64)
     ref_y = np.zeros(width, dtype=np.int64)
     ref_x = np.zeros(width, dtype=np.int64)
+    ref_p = np.zeros(width, dtype=np.int64)
 
     match_table[:] = 0
     flat_n = 0
@@ -345,8 +378,11 @@ def _code_plane1(encode, plane, data, out, st, params,
                     bx = nbx - 1
                 if modes[by, bx] == 1:
                     mode_x[x] = 1
-                    ry = y + mvs[by, bx, 0] // mv_sy
-                    rx = x + mvs[by, bx, 1] // mv_sx
+                    hy = mvs[by, bx, 0] // mv_sy
+                    hx = mvs[by, bx, 1] // mv_sx
+                    ry = y + (hy >> 1)
+                    rx = x + (hx >> 1)
+                    ref_p[x] = (hy & 1) * 2 + (hx & 1)
                     ref_y[x] = 0 if ry < 0 else (height - 1 if ry >= height else ry)
                     ref_x[x] = 0 if rx < 0 else (width - 1 if rx >= width else rx)
                 else:
@@ -518,7 +554,7 @@ def _code_plane1(encode, plane, data, out, st, params,
                 match_table[mhash] = flat_n
 
             if inter_on and mode_x[x]:
-                pred = ref_plane[ref_y[x], ref_x[x]]
+                pred = ref_plane[ref_p[x], ref_y[x], ref_x[x]]
                 b_zero = i_zero
                 b_nb = i_nb
                 b_sign = i_sign
@@ -906,7 +942,8 @@ class Bank:
 
 _DUMMY_MODES = np.zeros((1, 1), dtype=np.int64)
 _DUMMY_MVS = np.zeros((1, 1, 2), dtype=np.int64)
-_DUMMY_PLANE = np.zeros((1, 1), dtype=np.int64)
+# (phase, y, x) - four half-pel phases of the reference plane.
+_DUMMY_PLANE = np.zeros((4, 1, 1), dtype=np.int64)
 
 
 class Coder:

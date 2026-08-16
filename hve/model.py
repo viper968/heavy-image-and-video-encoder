@@ -218,18 +218,22 @@ class InterInfo:
 
     `bs_y`/`bs_x` are this plane's block size and `mv_sy`/`mv_sx` the motion
     vector divisors, so a subsampled chroma plane can reuse the luma decisions.
+
+    `ref_phases` is the reference plane at its four half-pel phases, indexed
+    (dy & 1) * 2 + (dx & 1). Chroma divides the luma vector down first, which
+    lands it on quarter-pel positions of the luma grid for free.
     """
 
-    __slots__ = ("modes", "mvs", "bs_y", "bs_x", "mv_sy", "mv_sx", "ref_rows")
+    __slots__ = ("modes", "mvs", "bs_y", "bs_x", "mv_sy", "mv_sx", "ref_phases")
 
-    def __init__(self, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref_rows):
+    def __init__(self, modes, mvs, bs_y, bs_x, mv_sy, mv_sx, ref_phases):
         self.modes = modes
         self.mvs = mvs
         self.bs_y = bs_y
         self.bs_x = bs_x
         self.mv_sy = mv_sy
         self.mv_sx = mv_sx
-        self.ref_rows = ref_rows
+        self.ref_phases = ref_phases
 
 
 def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=None,
@@ -277,7 +281,7 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
     if inter is not None:
         i_zero, i_nb, i_sign, i_mant = kind_offsets(kind + INTER_KIND_OFFSET)
         nbx = len(inter.modes[0])
-        ref_rows = inter.ref_rows
+        ref_phases = inter.ref_phases
 
     rows = []
     err_rows = []
@@ -323,9 +327,15 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
                 bx = min(x // inter.bs_x, nbx - 1)
                 if mode_row[bx] == MODE_TEMPORAL:
                     mode_x[x] = 1
-                    ry = y + int(mv_row[bx][0]) // inter.mv_sy
-                    rx = x + int(mv_row[bx][1]) // inter.mv_sx
-                    ref_row_of_x[x] = ref_rows[
+                    # Scale the luma vector to this plane, then split it into a
+                    # whole-pixel offset and a half-pel phase. The shift floors,
+                    # so a negative half-pel vector lands on the correct side.
+                    hy = int(mv_row[bx][0]) // inter.mv_sy
+                    hx = int(mv_row[bx][1]) // inter.mv_sx
+                    ry = y + (hy >> 1)
+                    rx = x + (hx >> 1)
+                    phase = ref_phases[(hy & 1) * 2 + (hx & 1)]
+                    ref_row_of_x[x] = phase[
                         0 if ry < 0 else (height - 1 if ry >= height else ry)]
                     ref_col_of_x[x] = 0 if rx < 0 else (width - 1 if rx >= width else rx)
 
