@@ -18,9 +18,17 @@
 #define HVE_VERSION "0.1.0"
 #endif
 
+/* Wall clock, not clock().
+ *
+ * clock() returns CPU time, which with threads is the sum across cores: an
+ * 8-slice 1080p encode that took 1.7 seconds reported 13.0. timespec_get is
+ * C11, so it needs no POSIX and works under mingw. */
 static double now(void)
 {
-    return (double)clock() / CLOCKS_PER_SEC;
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) != TIME_UTC)
+        return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
 static const char *extension(const char *path)
@@ -59,6 +67,10 @@ static void usage(FILE *fh)
         "  --preset P   max (default, best ratio) or fast (1.8-2.5x quicker\n"
         "               on 1080p video for 1-4%% more bytes). Recorded in the\n"
         "               file, so decoding needs no flag.\n"
+        "  --slices N   independent horizontal slices, coded on N cores, or\n"
+        "               `auto` (default: one per ~250k pixels, capped at the\n"
+        "               core count). Each slice relearns the model, so this\n"
+        "               costs ratio - under 1%% on 1080p, more on small frames.\n"
         "  --features N explicit model-stage bitmask, for experiments\n"
         "  -v           per-frame progress on stderr\n");
 }
@@ -91,7 +103,7 @@ static const char *preset_name(int64_t f)
 }
 
 static int cmd_encode(const char *in, const char *out, int frames, int verbose,
-                      int64_t features)
+                      int64_t features, int nslices)
 {
     hve_buf blob = {0};
     double t0 = now();
@@ -107,7 +119,15 @@ static int cmd_encode(const char *in, const char *out, int frames, int verbose,
         for (int i = 0; i < n; i++)
             for (int p = 0; p < fs[i].nplanes; p++)
                 original += (size_t)fs[i].p[p].h * fs[i].p[p].w;
-        int rc = hve_video_encode(fs, n, features, &blob, verbose);
+        if (nslices < 0) {
+            int64_t sy = fs[0].nplanes > 1
+                ? fs[0].p[0].h / fs[0].p[1].h : 1;
+            nslices = hve_slice_auto(fs[0].p[0].h, fs[0].p[0].w,
+                                     sy < 1 ? 1 : sy, hve_threads_default());
+        }
+        int rc = nslices > 1
+            ? hve_slice_video_encode(fs, n, features, nslices, &blob, verbose)
+            : hve_video_encode(fs, n, features, &blob, verbose);
         for (int i = 0; i < n; i++)
             hve_frame_free(&fs[i]);
         free(fs);
@@ -122,7 +142,12 @@ static int cmd_encode(const char *in, const char *out, int frames, int verbose,
         if (hve_png_read(in, &img, &h, &w, &channels) != 0)
             return fail();
         original = (size_t)h * w * channels;
-        int rc = hve_image_encode(img, h, w, channels, features, &blob);
+        if (nslices < 0)
+            nslices = hve_slice_auto(h, w, 1, hve_threads_default());
+        int rc = nslices > 1
+            ? hve_slice_image_encode(img, h, w, channels, features,
+                                     nslices, &blob)
+            : hve_image_encode(img, h, w, channels, features, &blob);
         free(img);
         if (rc != 0) {
             hve_buf_free(&blob);
@@ -134,9 +159,10 @@ static int cmd_encode(const char *in, const char *out, int frames, int verbose,
         hve_buf_free(&blob);
         return fail();
     }
-    printf("%s -> %s  %zu -> %zu bytes (%.2fx, %.1fs, preset %s)\n", in, out,
-           original, blob.len, (double)original / (double)blob.len, now() - t0,
-           preset_name(features));
+    printf("%s -> %s  %zu -> %zu bytes (%.2fx, %.1fs, preset %s, %d slice%s)\n",
+           in, out, original, blob.len, (double)original / (double)blob.len,
+           now() - t0, preset_name(features), nslices,
+           nslices == 1 ? "" : "s");
     hve_buf_free(&blob);
     return 0;
 }
@@ -155,7 +181,38 @@ static int cmd_decode(const char *in, const char *out, int verbose)
     }
 
     int rc;
-    if (!memcmp(blob, HVV_MAGIC, 4)) {
+    if (hve_is_sliced(blob, n)) {
+        /* A sliced file is a list of ordinary sub-streams; peek past the
+         * wrapper to see whether they are stills or video. */
+        int is_video = 0;
+        for (size_t i = 4; i + 4 <= n && i < 512; i++)
+            if (!memcmp(blob + i, HVV_MAGIC, 4)) {
+                is_video = 1;
+                break;
+            } else if (!memcmp(blob + i, HVI_MAGIC, 4)) {
+                break;
+            }
+        if (is_video) {
+            hve_frame *frames = NULL;
+            int nframes = 0;
+            rc = hve_slice_video_decode(blob, n, &frames, &nframes, verbose);
+            if (rc == 0) {
+                rc = hve_y4m_write(out, frames, nframes, "25:1");
+                for (int i = 0; i < nframes; i++)
+                    hve_frame_free(&frames[i]);
+                free(frames);
+            }
+        } else {
+            uint8_t *img = NULL;
+            int64_t h = 0, w = 0;
+            int channels = 0;
+            rc = hve_slice_image_decode(blob, n, &img, &h, &w, &channels);
+            if (rc == 0) {
+                rc = hve_png_write(out, img, h, w, channels);
+                free(img);
+            }
+        }
+    } else if (!memcmp(blob, HVV_MAGIC, 4)) {
         hve_frame *frames = NULL;
         int nframes = 0;
         rc = hve_video_decode(blob, n, &frames, &nframes, verbose);
@@ -255,6 +312,7 @@ int main(int argc, char **argv)
      * was measured picking the wrong preset on the very clip that motivated the
      * feature. x264 makes the caller choose a preset; so does this. */
     int64_t features = PRESET_MAX;
+    int nslices = -1;      /* -1 = scale with the frame size */
 
     if (argc < 2) {
         usage(stderr);
@@ -288,6 +346,9 @@ int main(int argc, char **argv)
                 fprintf(stderr, "error: unknown preset %s (max, fast)\n", v);
                 return 2;
             }
+        } else if (!strcmp(argv[i], "--slices") && i + 1 < argc) {
+            nslices = strcmp(argv[i + 1], "auto") ? atoi(argv[i + 1]) : -1;
+            i++;
         } else if (!strcmp(argv[i], "--features") && i + 1 < argc) {
             /* Research knob: an explicit stage bitmask. The decoder reads it
              * back out of the header, so only encoding needs it. */
@@ -309,7 +370,7 @@ int main(int argc, char **argv)
             return 2;
         }
         return cmd_encode(positional[0], positional[1], frames, verbose,
-                          features);
+                          features, nslices);
     }
     if (!strcmp(cmd, "decode")) {
         if (npos != 2) {

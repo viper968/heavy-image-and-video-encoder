@@ -175,4 +175,12 @@ int hve_threads_default(void);
 /* Override the core count the search uses; 0 restores the default. */
 void hve_set_threads(int n);
 
+/* Override the frame area below which the motion search skips its pyramid.
+ * A slice is a thin wide strip: it has few *pixels* but full resolution, so
+ * judging it by area turns the pyramid off and makes the search exhaustive.
+ * The slice encoder sets this from the whole frame so a slice searches the way
+ * the unsliced frame would. Negative restores the built-in threshold. */
+void hve_set_pyramid_min(int64_t pixels);
+int64_t hve_pyramid_min(int64_t builtin);
+
 #endif /* HVE_H */

@@ -669,6 +669,80 @@ design rather than code — the entropy-coder structure and the WPP/tile
 synchronisation rules are described in papers, and this codec's data structures
 look nothing like theirs.
 
+## Slices: why not wavefronts, and what they actually cost
+
+The pixel loop is strictly serial, so the only way onto a second core is to cut
+the picture into independent pieces.
+
+**Wavefronts are the better design and are not available here.** HEVC's WPP
+starts each CTU row from a *copy* of the entropy state as it stood two CTUs into
+the row above - a checkpoint, not a reset - which is why it costs far less than
+independent tiles. That works because CABAC's entire context set is a few
+hundred bytes. This model is **4.5 MB**: 472 KB of probability banks, mixers and
+APMs, 13 KB of combiner weights, and a 4 MB match hash table. Checkpointing that
+per CTU row would be 304 MB of copying per 1080p frame. The measurement that
+made wavefronts attractive - that our slicing penalty is a *relearning* penalty -
+is still right; the remedy is just out of reach at this model size. That is a
+consequence of the compression architecture, not an implementation shortcut.
+
+So: independent horizontal slices, each with its own model, coder and motion
+search. `csrc/slice.c`, `--slices N`.
+
+### What it costs
+
+Cost is governed by how much data each slice has to amortise its relearning
+over, so it falls as the frames get bigger:
+
+| content | 4 slices | 8 | 16 |
+|---|---:|---:|---:|
+| park_joy 1080p | +0.24% | +0.40% | +0.69% |
+| in_to_tree 1080p | +0.22% | +0.29% | +0.46% |
+| Sintel 1080p @400 | +0.40% | +0.78% | +1.52% |
+| kodim13 still (768x512) | +0.70% | +1.41% | +2.46% |
+| foreman CIF | +1.80% | +2.61% | +4.10% |
+| Sintel @0 (near-black) | +4.70% | +8.73% | +16.43% |
+
+On real 1080p video sixteen slices costs **under 1%**. The expensive cases are
+small frames and pathologically compressible content, which is why the default
+is one slice per ~250k pixels capped at the core count - 8 at 1080p, 1 at CIF,
+1 for a typical photograph.
+
+### What it buys, and two bugs found getting there
+
+park_joy, 16 frames of 1080p, on a 16-core i5:
+
+| preset | slices | bytes | vs base | encode | decode |
+|---|---|---:|---:|---:|---:|
+| max | 1 | 22,341,378 | — | 7.89s | 7.07s |
+| max | 4 | 22,395,863 | +0.24% | 2.42s | 2.41s |
+| **max** | **16** | **22,497,649** | **+0.69%** | **1.38s** | **1.29s** |
+| fast | 1 | 23,214,813 | +3.90% | 4.30s | 4.87s |
+| **fast** | **16** | **23,366,845** | **+4.58%** | **0.83s** | **0.76s** |
+
+x264 lossless on the same clip, also using all 16 cores: **23,108,086 bytes in
+2.35s** at `-preset veryslow`, **23,255,288 in 0.84s** at `-preset medium`.
+
+So the full model at sixteen slices is **2.6% smaller than x264 veryslow and
+1.7x faster**, for 0.69% against the unsliced encoder. That is past the goal
+without spending any of the 10-15% ratio budget that was on offer, and without
+needing the fast preset at all - the preset is now only interesting if you want
+to go below x264 `medium`'s time.
+
+Two things had to be fixed before it scaled, and both were mine:
+
+**Thread oversubscription.** The motion search is itself threaded, so every
+slice spawned a full core count of search threads: 256 on a 16-core machine at
+16 slices. Total CPU work rose 4.5x and wall time at 16 slices was *worse* than
+at 4. The slice runner now divides the budget.
+
+**A pyramid cliff between 4 and 8 slices.** The motion search skips its
+coarse-to-fine pyramid below `PYRAMID_MIN_PIXELS`, a rule written to stop the
+pyramid hurting at CIF. A 1920x135 slice has fewer pixels than CIF but full
+horizontal resolution, so the test switched the pyramid off and made the search
+exhaustive - 289 positions instead of about 43. Judging the pyramid by the whole
+frame rather than the strip took 16 slices from 1.92s to 0.90s. Area was always
+the wrong criterion; a thin wide strip is not a small picture.
+
 ## The cost of a third implementation, and why there are two again
 
 Adding the C made three implementations of one loop: `model.py` defining the

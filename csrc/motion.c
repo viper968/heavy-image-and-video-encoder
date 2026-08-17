@@ -289,6 +289,7 @@ int hve_motion_search(const uint8_t *cur, const uint8_t *ref,
 
     /* Halve until an exhaustive search is affordable, but only as deep as the
      * block size and search radius survive. Transcribed from video.py. */
+    pyramid_min_pixels = hve_pyramid_min(pyramid_min_pixels);
     while (levels < pyramid_levels
            && ((h * w) >> (2 * levels)) > pyramid_min_pixels
            && (bs >> (levels + 1)) >= 4
@@ -447,6 +448,17 @@ int hve_spatial_cost(const uint8_t *cur, int64_t h, int64_t w, int64_t bs,
 }
 
 static int g_threads = 0;
+static int64_t g_pyramid_min = -1;
+
+void hve_set_pyramid_min(int64_t pixels)
+{
+    g_pyramid_min = pixels;
+}
+
+int64_t hve_pyramid_min(int64_t builtin)
+{
+    return g_pyramid_min >= 0 ? g_pyramid_min : builtin;
+}
 
 void hve_set_threads(int n)
 {

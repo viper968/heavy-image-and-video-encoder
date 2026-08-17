@@ -26,7 +26,7 @@ CFLAGS  ?= $(CFLAGS_COMMON) -march=native
 LDFLAGS ?=
 LDLIBS  ?= -lm -pthread
 
-SRC = main.c container.c model.c transform.c util.c y4m.c imageio.c \
+SRC = main.c container.c slice.c model.c transform.c util.c y4m.c imageio.c \
       kernel.c motion.c third_party/lodepng.c
 HDR = hve.h hvefmt.h hvemodel.h med.h thread.h model_constants.h
 

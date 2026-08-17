@@ -340,3 +340,97 @@ def test_old_container_magic_is_rejected(tmp_path):
     assert proc.returncode != 0
     with pytest.raises(ValueError):
         image.decode(bytes(blob))
+
+
+# --------------------------------------------------------------------------
+# slices (thread parallelism)
+
+
+@pytest.mark.parametrize("nslices", [1, 2, 3, 4, 8])
+def test_sliced_stills_roundtrip(tmp_path, nslices):
+    """Odd slice counts matter: the boundaries are a derived division, so an
+    off-by-one there loses or duplicates a row rather than failing."""
+    arr = np.random.default_rng(31).integers(0, 256, (67, 53, 3), dtype=np.uint8)
+    src = png(str(tmp_path / "in.png"), arr)
+    blob, back = str(tmp_path / "a.hvi"), str(tmp_path / "b.png")
+    run("encode", src, blob, "--slices", str(nslices))
+    run("decode", blob, back)
+    got = read_png(back)
+    assert got.shape == arr.shape
+    assert np.array_equal(got, arr)
+
+
+@pytest.mark.parametrize("nslices", [2, 3, 5])
+def test_sliced_video_roundtrips(tmp_path, nslices):
+    """Slice boundaries have to land on even luma rows or the 4:2:0 chroma
+    planes split at a fractional row."""
+    frames = _synth_clip(70, 96)
+    src = _write_y4m(str(tmp_path / "in.y4m"), frames, 96, 70)
+    blob, back = str(tmp_path / "a.hvv"), str(tmp_path / "b.y4m")
+    run("encode", src, blob, "--slices", str(nslices))
+    run("decode", blob, back)
+    reader = y4m.Y4M(back)
+    got = [[p.copy() for p in f] for f in reader.frames()]
+    reader.close()
+    assert len(got) == len(frames)
+    for want, have in zip(frames, got):
+        for a, b in zip(want, have):
+            assert a.shape == b.shape
+            assert np.array_equal(a, b)
+
+
+def test_slice_count_is_capped_by_height(tmp_path):
+    """Asking for more slices than there are block rows must clamp, not make
+    zero-row slices."""
+    frames = _synth_clip(32, 64)
+    src = _write_y4m(str(tmp_path / "in.y4m"), frames, 64, 32)
+    blob, back = str(tmp_path / "a.hvv"), str(tmp_path / "b.y4m")
+    run("encode", src, blob, "--slices", "32")
+    run("decode", blob, back)
+    reader = y4m.Y4M(back)
+    got = [[p.copy() for p in f] for f in reader.frames()]
+    reader.close()
+    for want, have in zip(frames, got):
+        for a, b in zip(want, have):
+            assert np.array_equal(a, b)
+
+
+def test_slices_combine_with_the_fast_preset(tmp_path):
+    frames = _synth_clip(64, 96)
+    src = _write_y4m(str(tmp_path / "in.y4m"), frames, 96, 64)
+    blob, back = str(tmp_path / "a.hvv"), str(tmp_path / "b.y4m")
+    run("encode", src, blob, "--slices", "4", "--preset", "fast")
+    run("decode", blob, back)
+    reader = y4m.Y4M(back)
+    got = [[p.copy() for p in f] for f in reader.frames()]
+    reader.close()
+    for want, have in zip(frames, got):
+        for a, b in zip(want, have):
+            assert np.array_equal(a, b)
+
+
+def test_single_slice_is_byte_identical_to_the_unsliced_encoder(tmp_path):
+    """--slices 1 must not wrap the stream, so it stays readable by Python."""
+    arr = np.random.default_rng(32).integers(0, 256, (40, 40, 3), dtype=np.uint8)
+    src = png(str(tmp_path / "in.png"), arr)
+    one, none = str(tmp_path / "one.hvi"), str(tmp_path / "none.hvi")
+    run("encode", src, one, "--slices", "1")
+    run("encode", src, none)
+    with open(one, "rb") as fh:
+        blob = fh.read()
+    assert blob == image.encode(arr)
+    assert np.array_equal(image.decode(blob), arr)
+
+
+def test_python_rejects_a_sliced_file_it_cannot_read(tmp_path):
+    """Slices are a C-side feature for now; Python must say so rather than
+    mistake the wrapper for a corrupt image."""
+    arr = np.random.default_rng(33).integers(0, 256, (64, 48, 3), dtype=np.uint8)
+    src = png(str(tmp_path / "in.png"), arr)
+    blob = str(tmp_path / "a.hvi")
+    run("encode", src, blob, "--slices", "4")
+    with open(blob, "rb") as fh:
+        data = fh.read()
+    assert data[:4] == b"HVS1"
+    with pytest.raises(ValueError):
+        image.decode(data)

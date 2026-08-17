@@ -140,11 +140,20 @@ int hve_bank_init(hve_bank *m, int64_t luma_h, int64_t luma_w,
         m->params[i] = HVE_PARAMS[i];
     m->params[P_FEATURES] = features;
     m->m.params = m->params;
-    m->match_table = (int32_t *)calloc((size_t)HVE_MATCH_HASH_MASK + 1,
-                                       sizeof(int32_t));
+    const int want_match = (features & HVE_FEAT_MATCH) != 0;
+    /* 4 MB of hash table, and the pixel loop clears it once per plane. With
+     * the match model switched off none of that is read, so allocating and
+     * clearing it is pure waste - and with slices it is waste multiplied by
+     * the slice count, which was enough to flatten the threading speedup. */
+    if (want_match) {
+        m->match_table = (int32_t *)calloc((size_t)HVE_MATCH_HASH_MASK + 1,
+                                           sizeof(int32_t));
+        if (!m->match_table)
+            goto oom;
+    }
     m->flat = (uint8_t *)calloc((size_t)luma_h * luma_w, 1);
     m->errmap = (uint8_t *)calloc((size_t)luma_h * luma_w, 1);
-    if (!m->match_table || !m->flat || !m->errmap)
+    if (!m->flat || !m->errmap)
         goto oom;
     m->m.match_table = m->match_table;
     m->m.flat = m->flat;

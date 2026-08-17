@@ -106,6 +106,22 @@ int hve_video_decode(const uint8_t *blob, size_t n, hve_frame **frames,
  * file I/O
  */
 
+/* --- horizontal slices, for thread parallelism (csrc/slice.c) --- */
+
+int hve_is_sliced(const uint8_t *blob, size_t n);
+int hve_slice_count(int64_t h, int64_t sy, int wanted);
+int hve_slice_auto(int64_t h, int64_t w, int64_t sy, int cores);
+int hve_slice_image_encode(const uint8_t *img, int64_t h, int64_t w,
+                           int channels, int64_t features, int nslices,
+                           hve_buf *out);
+int hve_slice_image_decode(const uint8_t *blob, size_t n, uint8_t **img,
+                           int64_t *h, int64_t *w, int *channels);
+int hve_slice_video_encode(const hve_frame *frames, int nframes,
+                           int64_t features, int nslices, hve_buf *out,
+                           int verbose);
+int hve_slice_video_decode(const uint8_t *blob, size_t n, hve_frame **frames,
+                           int *nframes, int verbose);
+
 int hve_png_read(const char *path, uint8_t **img, int64_t *h, int64_t *w,
                  int *channels);
 int hve_png_write(const char *path, const uint8_t *img, int64_t h, int64_t w,

@@ -451,7 +451,9 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
     int64_t ex[5];
     int32_t lms_x[HVE_LMS_MAX];
 
-    memset(m->match_table, 0, ((size_t)hash_mask + 1) * sizeof(int32_t));
+    if (f_match)
+        memset(m->match_table, 0,
+               ((size_t)hash_mask + 1) * sizeof(int32_t));
     int64_t flat_n = 0, match_pos = 0, match_len = 0;
 
     for (int64_t y = 0; y < height; y++) {
