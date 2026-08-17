@@ -345,14 +345,23 @@ The older options, still open, roughly in order of expected value:
   `csrc/y4m.c` claims the rate *is* carried through, so the code and the comment
   disagree. Fixing it means a field in the video header, i.e. another format
   bump; worth folding into the next one rather than spending a bump on its own.
-- **Precomputing contexts on the encoder side.** The one structural speed idea
-  the profiling turned up, unbuilt and uncosted: the loop is serial because each
-  pixel's context depends on its neighbours' decoded values, but the codec is
-  lossless, so on the *encoder* decoded equals source and every context index is
-  a pure function of the input. Prediction and context formation could run as a
-  vectorisable pass over the whole plane before the serial coding pass. Estimated
-  25-35% of encode, no bitstream change, decoder untouched. Caveats in
-  `docs/research.md`.
+- ~~**Precomputing contexts on the encoder side**~~ — **done, and it returned a
+  third of what was predicted.** `derive_row` in `csrc/kernel.c` derives a whole
+  row of contexts before the serial pass, on the `fast` preset only (blend, LMS
+  and match adapt in scan order and cannot be hoisted). Byte-identical; **-8.5%
+  wall, -15.3% instructions** on 1080p, ~0 on stills and on `max`. The estimate
+  said 25-35%. Two thirds of the shortfall is that the context-index half of the
+  work is all ladder lookups, and a gather is the only vector form of a lookup —
+  forcing one with `-mtune-ctrl=use_gather` removes 10% of the instructions and
+  changes wall time by 0.2%, so there is nothing there. Read "The structural one"
+  in `docs/research.md` before trying to push it further; a comparison-cascade
+  replacement for the lookups was also built and was *worse*.
+
+  If you touch the derivation, `--batched 0` turns it off, and
+  `test_batched_derivation_matches_the_scalar_path` asserts the two produce the
+  same bytes. That test is the only thing pinning them: the Python byte-identity
+  tests cannot reach this path, because `model.py` implements only the full
+  model and the full model switches batching off.
 - ~~**AV1's multi-symbol entropy coder**~~ — **measured and ruled out.** A build
   with the range coder stubbed out entirely — the upper bound on any coder
   change — is only 7.0% faster on the `fast` preset and *within noise* on `max`.

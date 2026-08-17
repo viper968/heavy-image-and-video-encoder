@@ -931,7 +931,7 @@ work per sample.
 Two things follow. The first has been acted on: a per-sample integer division
 was sitting in that 6.3% addressing bucket, worth about 5% for free.
 
-### The structural one, not yet built or costed
+### The structural one: built, and worth a third of what was predicted
 
 The loop is serial because each pixel's context depends on its neighbours'
 *decoded* values. On the encoder that constraint is imaginary: the codec is
@@ -954,8 +954,72 @@ Two caveats before anyone believes the number. The LMS filter and the match
 model adapt in scan order, so they stay sequential even in the first pass; only
 the local per-pixel work vectorises. And it helps the encoder only - the
 decoder genuinely cannot know a value before decoding it, so decode stays as it
-is, and decode is currently the same speed as encode. This is an estimate from
-the profile above, not a measurement, and nothing here has been built.
+is, and decode is currently the same speed as encode.
+
+**That prediction of 25-35% was wrong. It was built, and it is worth 8%.**
+
+`derive_row` in `csrc/kernel.c` derives a whole row of contexts up front. It
+runs when the blend, LMS and match stages are all off - the `fast` preset -
+because those three adapt in scan order and genuinely cannot be hoisted. Output
+is byte-identical, verified against the pre-change encoder on real 1080p and by
+`--batched 0`, a switch that exists only so the tests can pin the two
+derivations against each other.
+
+| 16 frames of 1080p Sintel, `fast` | wall | instructions |
+|---|---:|---:|
+| baseline | 1.912s | 39.15e9 |
+| dead work removed, no batching | — | 36.50e9 (-6.7%) |
+| batched derivation | **1.749s (-8.5%)** | **33.12e9 (-15.3%)** |
+
+Elsewhere: -6% at 1080p with slices on, -2% on CIF, and nothing on stills or on
+the `max` preset, which does not take the path at all. Wall-clock swings a few
+percent run to run on a desktop with a browser on it, so the instruction counts
+are the load-independent version of the same story.
+
+#### Why the estimate was three times too high
+
+**Half the derive work would not vectorise, and could not.** Prediction, the
+residual and the activity bins vectorised as expected and collapsed from about
+18% of the loop to 5%. The other half - forming the context indices - is
+nothing but ladder lookups, and a gather is the only vector form of a lookup.
+GCC's cost model declines to emit gathers on this tuning. That looked like a
+missed optimisation, so it was measured rather than argued about:
+
+| step 5 and 6 | instructions | wall |
+|---|---:|---:|
+| tables, no gather (shipped) | 35.54e9 | 1.856s |
+| `-mtune-ctrl=use_gather` | 32.03e9 (-9.9%) | 1.852s (**-0.2%**) |
+
+Forcing the gather removes a tenth of the instructions and **changes the wall
+time by nothing at all**. GCC's heuristic is right: gather on this
+microarchitecture costs about what the scalar loads cost. There was no win
+being left on the table, which is worth knowing before anyone reaches for
+intrinsics. It is also a clean reminder that instruction count is not time.
+
+The obvious way around a gather is to replace the lookup with the comparison
+cascade it is really made of - `hve_bisect` is just "how many thresholds are
+<= v", and these ladders have 2 to 7 entries. That was built too, and it is
+**worse**: 36.66e9 instructions against the tables' 35.54e9, and a wash on the
+clock (-0.1%). Sixteen compares per pixel do not beat two L1 hits. Reverted.
+
+**And most of what was gained is not vectorisation.** Restructuring exposed
+that with those three stages off, two per-pixel quantities are invariant: the
+match context, and the confidence context - which was running a linear ladder
+scan every pixel to return a constant. Hoisting those, plus skipping the
+blend's error rows and the match model's history when their stage is off, is
+-6.7% instructions on its own, before a single loop vectorised. Vectorising
+added roughly half again as much.
+
+**The ceiling was always low.** The serial pass is 79% of the coding loop and
+this touches none of it: even a *free* derive pass would be -21%. The estimate
+quietly assumed the derive half could be driven to zero, and it also priced the
+derive work at 35% using a profile of the *old* code, in which some of that
+work was dead.
+
+What it does not do is help the decoder, exactly as predicted - the decoder
+cannot know a value before decoding it, so it still derives one pixel at a
+time. Encode and decode used to cost about the same; encode is now the faster
+of the two.
 
 ## The cost of a third implementation, and why there are two again
 

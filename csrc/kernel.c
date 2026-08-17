@@ -160,6 +160,18 @@ static inline int64_t dec_bypass(hve_rc *r, const uint8_t *data, int64_t nbits)
     return value;
 }
 
+static int g_batched = 1;
+
+void hve_set_batched(int on)
+{
+    g_batched = on ? 1 : 0;
+}
+
+int hve_batched_enabled(void)
+{
+    return g_batched;
+}
+
 int64_t hve_finish_encode(hve_rc *r, uint8_t *out)
 {
     for (int i = 0; i < 5; i++)
@@ -337,6 +349,12 @@ static inline int64_t wt(const wtable *w, int k, int64_t a)
 typedef struct {
     uint8_t act[LUT_ACT], err[LUT_ERR], side[LUT_SIDE], diff[LUT_DIFF];
     uint8_t lum[LUT_LUM], mexp[LUT_MEXP], adj[LUT_ADJ];
+    /* int32 mirrors of the four tables the batched derivation indexes. A
+     * gather that widens bytes is not something the vectoriser will emit, and
+     * these are a few kilobytes between them, so the scalar path keeps the
+     * compact uint8 tables and the batched path reads these. */
+    int32_t act32[LUT_ACT], err32[LUT_ERR], side32[LUT_SIDE], diff32[LUT_DIFF];
+    int32_t lum32[LUT_LUM];
 } ladder_luts;
 
 static void luts_init(ladder_luts *L, const hve_model *m)
@@ -348,10 +366,206 @@ static void luts_init(ladder_luts *L, const hve_model *m)
     for (int i = 0; i < LUT_LUM; i++)  L->lum[i]  = (uint8_t)hve_bisect(m->lum_l, i);
     for (int i = 0; i < LUT_MEXP; i++) L->mexp[i] = (uint8_t)hve_bisect(m->mexp_l, i);
     for (int i = 0; i < LUT_ADJ; i++)  L->adj[i]  = (uint8_t)hve_bisect(m->adj_l, i);
+    for (int i = 0; i < LUT_ACT; i++)  L->act32[i]  = L->act[i];
+    for (int i = 0; i < LUT_ERR; i++)  L->err32[i]  = L->err[i];
+    for (int i = 0; i < LUT_SIDE; i++) L->side32[i] = L->side[i];
+    for (int i = 0; i < LUT_DIFF; i++) L->diff32[i] = L->diff[i];
+    for (int i = 0; i < LUT_LUM; i++)  L->lum32[i]  = L->lum[i];
 }
 
 #define LOOKUP(tbl, size, ladder, v) \
     ((uint64_t)(v) < (size) ? (int64_t)(tbl)[(v)] : hve_bisect((ladder), (v)))
+
+/* --------------------------------------------------------------------------
+ * Batched context derivation (encoder only)
+ *
+ * The pixel loop is serial because each pixel's context is built from its
+ * neighbours' *decoded* values. On the encoder that constraint is imaginary:
+ * this codec is lossless, so decoded equals source, and the encoder holds the
+ * whole plane before it codes anything. Every context index below is a pure
+ * function of the source - nothing here reads a coded bit - so a whole row of
+ * them can be derived up front in flat loops a compiler can vectorise, leaving
+ * the serial pass to do only the model and the arithmetic coder.
+ *
+ * This runs only when the blend, LMS and match stages are all off, which is
+ * the `fast` preset. Those three adapt in scan order and genuinely cannot be
+ * hoisted. The decoder can never use this path: it does not know a value until
+ * it has decoded it.
+ *
+ * It must agree with the scalar derivation in hve_code_plane exactly, since
+ * both write the same bitstream. tests/test_batched.py pins that.
+ */
+typedef struct {
+    int64_t width, use_luma, inter_on;
+    int64_t nerr, nlum, nside, ndiff, max_nb;
+    int64_t k_zero, k_nb, i_zero, i_nb, kind_dir, kind_diff;
+} derive_cfg;
+
+typedef struct {
+    int32_t *pred, *d, *actb, *sgn, *zctx, *dirc, *diffc, *nbb, *isel;
+} derive_row_buf;
+
+static void derive_row(const derive_cfg *c, const ladder_luts *restrict L,
+                       const uint8_t *restrict src,
+                       const int32_t *restrict prev,
+                       const int32_t *restrict prev_err,
+                       const uint8_t *restrict errmap,
+                       const uint8_t *restrict mode_x,
+                       const uint8_t *restrict ref_p,
+                       const int32_t *restrict ref_y,
+                       const int32_t *restrict ref_x,
+                       const uint8_t *restrict ref, int64_t height,
+                       int first_row, const derive_row_buf *b)
+{
+    const int64_t width = c->width;
+    int32_t *restrict pred = b->pred;
+    int32_t *restrict d = b->d;
+    int32_t *restrict actb = b->actb;
+    int32_t *restrict sgn = b->sgn;
+    int64_t x;
+
+    /* 1. MED prediction. The scalar form is the LOCO-I median predictor
+     * written as a nest of comparisons; this is the same function with the
+     * branches turned into min/max so it vectorises. */
+    if (first_row) {
+        pred[0] = 128;
+        for (x = 1; x < width; x++)
+            pred[x] = src[x - 1];
+    } else {
+        pred[0] = prev[0];
+        for (x = 1; x < width; x++) {
+            int32_t west = src[x - 1], north = prev[x], nwest = prev[x - 1];
+            int32_t lo = north < west ? north : west;
+            int32_t hi = north < west ? west : north;
+            int32_t p = nwest >= hi ? lo
+                      : (nwest <= lo ? hi : north + west - nwest);
+            pred[x] = p > 255 ? 255 : (p < 0 ? 0 : p);
+        }
+    }
+
+    /* 2. Temporally predicted pixels take the reference instead. */
+    if (c->inter_on) {
+        for (x = 0; x < width; x++) {
+            b->isel[x] = mode_x[x];
+            if (mode_x[x])
+                pred[x] = ref[((int64_t)ref_p[x] * height + ref_y[x]) * width
+                              + ref_x[x]];
+        }
+    } else {
+        memset(b->isel, 0, (size_t)width * sizeof(int32_t));
+    }
+
+    /* 3. Residual and its magnitude. cur_err doubles as the magnitude row,
+     * which the serial pass would otherwise fill one pixel at a time. */
+    for (x = 0; x < width; x++) {
+        int32_t v = ((src[x] - pred[x] + 128) & 255) - 128;
+        d[x] = v;
+    }
+
+    /* 4. Activity and the sign pair. */
+    actb[0] = 0;
+    sgn[0] = 4;
+    if (first_row) {
+        for (x = 1; x < width; x++) {
+            actb[x] = 0;
+            sgn[x] = 4;
+        }
+    } else {
+        for (x = 1; x < width; x++) {
+            int32_t west = src[x - 1], north = prev[x], nwest = prev[x - 1];
+            int32_t neast = (x + 1 < width) ? prev[x + 1] : north;
+            int32_t d1 = ((west - nwest + 128) & 255) - 128;
+            int32_t d2 = ((nwest - north + 128) & 255) - 128;
+            int32_t d3 = ((north - neast + 128) & 255) - 128;
+            int32_t act = (d1 < 0 ? -d1 : d1) + (d2 < 0 ? -d2 : d2)
+                        + (d3 < 0 ? -d3 : d3);
+            actb[x] = L->act32[act];
+            sgn[x] = ((d1 > 0) - (d1 < 0) + 1) * 3 + ((d2 > 0) - (d2 < 0) + 1);
+        }
+    }
+
+    /* 5. The error-neighbourhood contexts. west_err is the previous pixel's
+     * magnitude, which step 3 already produced for the whole row.
+     *
+     * Everything here is deliberately int32. The obvious int64 spelling costs
+     * the vectoriser outright ("unsupported data-type long int"), and every
+     * context index in this model fits in far less than 32 bits - the largest
+     * table has a few thousand entries - so the width buys nothing.
+     *
+     * The luma term is multiplied by a 0/1 flag rather than branched on, so
+     * the loop body has no condition in it; when the plane has no luma map
+     * errmap points at a zero row. */
+    {
+        const int32_t nerr32 = (int32_t)c->nerr, nlum32 = (int32_t)c->nlum;
+        const int32_t nside32 = (int32_t)c->nside;
+        const int32_t nb_span = (int32_t)(c->max_nb + 1);
+        const int32_t kdir = (int32_t)c->kind_dir;
+        const int32_t zi = (int32_t)c->i_zero, zk = (int32_t)c->k_zero;
+        const int32_t ni = (int32_t)c->i_nb, nk = (int32_t)c->k_nb;
+        const int32_t *restrict Ler = L->err32;
+        const int32_t *restrict Lsd = L->side32;
+        const int32_t *restrict Llm = L->lum32;
+        const int32_t lum_on = (int32_t)c->use_luma;
+        int32_t *restrict zc = b->zctx;
+        int32_t *restrict nb = b->nbb;
+        int32_t *restrict dc = b->dirc;
+        const int32_t *restrict isel = b->isel;
+        /* The interior runs without any boundary tests in it, so the two ends
+         * are done by hand: at x == 0 there is no west, and at the last column
+         * there is no north-east. */
+#define DERIVE_CTX(x_, we_, ne_, ex_)                                        \
+        do {                                                                 \
+            int32_t sub = actb[x_] * nerr32 + Ler[(we_) + (ne_) + (ex_)];    \
+            int32_t lum = lum_on * Llm[errmap[x_]];                          \
+            zc[x_] = (isel[x_] ? zi : zk) + sub * nlum32 + lum;              \
+            nb[x_] = (isel[x_] ? ni : nk) + sub * nb_span;                   \
+            dc[x_] = kdir + (sgn[x_] * nside32 + Lsd[we_]) * nside32         \
+                   + Lsd[ne_];                                               \
+        } while (0)
+        if (first_row) {
+            DERIVE_CTX(0, 0, 0, 0);
+            for (x = 1; x < width; x++) {
+                int32_t we = d[x - 1] < 0 ? -d[x - 1] : d[x - 1];
+                DERIVE_CTX(x, we, 0, 0);
+            }
+        } else {
+            DERIVE_CTX(0, 0, prev_err[0], width > 1 ? prev_err[1] : 0);
+            for (x = 1; x + 1 < width; x++) {
+                int32_t we = d[x - 1] < 0 ? -d[x - 1] : d[x - 1];
+                DERIVE_CTX(x, we, prev_err[x], prev_err[x + 1]);
+            }
+            if (width > 1) {
+                int32_t we = d[width - 2] < 0 ? -d[width - 2] : d[width - 2];
+                DERIVE_CTX(width - 1, we, prev_err[width - 1], 0);
+            }
+        }
+#undef DERIVE_CTX
+    }
+
+    /* 6. The gradient-pair context. */
+    b->diffc[0] = (int32_t)c->kind_diff;
+    if (first_row) {
+        for (x = 1; x < width; x++)
+            b->diffc[x] = (int32_t)c->kind_diff;
+    } else {
+        const int32_t kdiff = (int32_t)c->kind_diff;
+        const int32_t ndiff32 = (int32_t)c->ndiff;
+        const int32_t *restrict Ldf = L->diff32;
+        int32_t *restrict fc = b->diffc;
+        for (x = 1; x + 1 < width; x++) {
+            int32_t west = src[x - 1], north = prev[x], nwest = prev[x - 1];
+            int32_t dwn = west - north, dne = nwest - prev[x + 1];
+            fc[x] = kdiff + Ldf[dwn >= 0 ? dwn : -dwn] * ndiff32
+                  + Ldf[dne >= 0 ? dne : -dne];
+        }
+        if (width > 1) {
+            int32_t west = src[width - 2], north = prev[width - 1];
+            int32_t dwn = west - north, dne = prev[width - 2] - north;
+            fc[width - 1] = kdiff + Ldf[dwn >= 0 ? dwn : -dwn] * ndiff32
+                          + Ldf[dne >= 0 ? dne : -dne];
+        }
+    }
+}
 
 int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                    const uint8_t *data, uint8_t *out, hve_rc *r, hve_model *m,
@@ -425,11 +639,18 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
     ladder_luts luts;
     luts_init(&luts, m);
 
+    /* The batched derivation above needs the blend, LMS and match stages off,
+     * because those three adapt in scan order, and it needs the source, so it
+     * is an encoder path only. */
+    const int batched = encode && !f_blend && !f_lms && !f_match
+                        && hve_batched_enabled();
+
     /* One allocation for every row buffer, so a plane costs one malloc. */
     const int64_t w2 = width + 2;
-    int32_t *mem = (int32_t *)calloc(5 * (size_t)width + 10 * w2 + 2 * (size_t)width,
+    int32_t *mem = (int32_t *)calloc(5 * (size_t)width + 10 * w2 + 2 * (size_t)width
+                                     + (batched ? 9 * (size_t)width : 0),
                                      sizeof(int32_t));
-    uint8_t *bytes = (uint8_t *)calloc(2 * (size_t)width, 1);
+    uint8_t *bytes = (uint8_t *)calloc(3 * (size_t)width, 1);
     if (!mem || !bytes) {
         free(mem);
         free(bytes);
@@ -448,6 +669,26 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
     int32_t *ref_x = ref_y + width;
     uint8_t *mode_x = bytes;
     uint8_t *ref_p = bytes + width;
+    /* Stays zero: the batched derivation multiplies the luma term out rather
+     * than branching, so it always has a row to read. */
+    const uint8_t *zero_row = bytes + 2 * width;
+
+    derive_row_buf drow;
+    derive_cfg dcfg;
+    {
+        int32_t *p = ref_x + width;
+        drow.pred = p;      drow.d = p + width;      drow.actb = p + 2 * width;
+        drow.sgn = p + 3 * width;  drow.zctx = p + 4 * width;
+        drow.dirc = p + 5 * width; drow.diffc = p + 6 * width;
+        drow.nbb = p + 7 * width;  drow.isel = p + 8 * width;
+        dcfg.width = width;       dcfg.use_luma = use_luma;
+        dcfg.inter_on = inter_on; dcfg.nerr = nerr;
+        dcfg.nlum = nlum;         dcfg.nside = nside;
+        dcfg.ndiff = ndiff;       dcfg.max_nb = max_nb;
+        dcfg.k_zero = k_zero;     dcfg.k_nb = k_nb;
+        dcfg.i_zero = i_zero;     dcfg.i_nb = i_nb;
+        dcfg.kind_dir = kind_dir; dcfg.kind_diff = kind_diff;
+    }
 
     int64_t ex[5];
     int32_t lms_x[HVE_LMS_MAX];
@@ -456,6 +697,14 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
         memset(m->match_table, 0,
                ((size_t)hash_mask + 1) * sizeof(int32_t));
     int64_t flat_n = 0, match_pos = 0, match_len = 0;
+
+    /* With the match and LMS stages off these two contexts never vary, so the
+     * batched path reads them from here instead of re-deriving per pixel -
+     * conf_ctx in particular was a linear ladder scan for a constant. */
+    const int64_t flat_match_ctx = kind_match;
+    const int64_t flat_conf_b = hve_bisect(m->conf_l, 0);
+    const int64_t flat_conf_ctx = kind_conf + flat_conf_b * nadj
+                                + LOOKUP(luts.adj, LUT_ADJ, m->adj_l, 0);
 
     for (int64_t y = 0; y < height; y++) {
         memset(cur, 0, (size_t)width * sizeof(int32_t));
@@ -507,13 +756,49 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
             }
         }
 
+        if (batched)
+            derive_row(&dcfg, &luts, plane + y * width, prev, prev_err,
+                       use_luma ? m->errmap + y * m->errmap_stride : zero_row,
+                       mode_x, ref_p, ref_y, ref_x,
+                       inter_on ? inter->ref : NULL, height, first_row, &drow);
+
         for (int64_t x = 0; x < width; x++) {
             int64_t mval = -1, msign = 0, mexp_b = 0;
             int64_t north = 0, nwest = 0, neast = 0;
             int64_t q0 = 0, q1 = 0, q2 = 0, q3 = 0;
             int lms_on = 0;
             int64_t lms_base_w = 0, lms_pred = 0, lms_adj = 0, energy = 0;
-            int64_t pred, act, act_b, sgn;
+            int64_t pred = 0, act = 0, act_b = 0, sgn = 0;
+            int64_t b_zero, b_nb, b_sign, b_mant, b_kind;
+            int64_t north_err, err_sum, zctx, nbbase, dir_ctx, diff_ctx;
+            int64_t match_ctx, conf_ctx, conf_b;
+
+            if (batched) {
+                /* Derived for the whole row already. With the match and LMS
+                 * stages off, the match and confidence contexts are the same
+                 * every pixel, so they are hoisted out of the plane entirely
+                 * rather than re-bisected here. */
+                pred = drow.pred[x];
+                act_b = drow.actb[x];
+                sgn = drow.sgn[x];
+                zctx = drow.zctx[x];
+                nbbase = drow.nbb[x];
+                dir_ctx = drow.dirc[x];
+                diff_ctx = drow.diffc[x];
+                match_ctx = flat_match_ctx;
+                conf_ctx = flat_conf_ctx;
+                conf_b = flat_conf_b;
+                if (drow.isel[x]) {
+                    b_sign = i_sign;
+                    b_mant = i_mant;
+                    b_kind = ikind;
+                } else {
+                    b_sign = k_sign;
+                    b_mant = k_mant;
+                    b_kind = kind;
+                }
+                goto have_context;
+            }
 
             if (first_row) {
                 pred = (x == 0) ? 128 : west;
@@ -693,7 +978,6 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 m->match_table[mhash] = (int32_t)flat_n;
             }
 
-            int64_t b_zero, b_nb, b_sign, b_mant, b_kind;
             if (inter_on && mode_x[x]) {
                 pred = inter->ref[((int64_t)ref_p[x] * height + ref_y[x]) * width
                                   + ref_x[x]];
@@ -710,8 +994,7 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 b_kind = kind;
             }
 
-            int64_t north_err = first_row ? 0 : prev_err[x];
-            int64_t err_sum;
+            north_err = first_row ? 0 : prev_err[x];
             if (first_row) {
                 err_sum = west_err;
             } else {
@@ -724,14 +1007,13 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
             int64_t lum = use_luma
                 ? LOOKUP(luts.lum, LUT_LUM, m->lum_l,
                          m->errmap[y * m->errmap_stride + x]) : 0;
-            int64_t zctx = b_zero + sub * nlum + lum;
-            int64_t nbbase = b_nb + sub * (max_nb + 1);
+            zctx = b_zero + sub * nlum + lum;
+            nbbase = b_nb + sub * (max_nb + 1);
 
-            int64_t dir_ctx = kind_dir
+            dir_ctx = kind_dir
                 + (sgn * nside
                    + LOOKUP(luts.side, LUT_SIDE, m->side_l, west_err)) * nside
                 + LOOKUP(luts.side, LUT_SIDE, m->side_l, north_err);
-            int64_t diff_ctx;
             if (first_row || x == 0) {
                 diff_ctx = kind_diff;
             } else {
@@ -743,7 +1025,6 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                     + LOOKUP(luts.diff, LUT_DIFF, m->diff_l,
                              dne >= 0 ? dne : -dne);
             }
-            int64_t match_ctx;
             if (mval < 0) {
                 match_ctx = kind_match;
                 msign = 0;
@@ -765,10 +1046,12 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 mexp_b = 1 + LOOKUP(luts.mexp, LUT_MEXP, m->mexp_l, ae);
             }
 
-            int64_t conf_b = hve_bisect(m->conf_l, energy);
-            int64_t conf_ctx = kind_conf + conf_b * nadj
+            conf_b = hve_bisect(m->conf_l, energy);
+            conf_ctx = kind_conf + conf_b * nadj
                 + LOOKUP(luts.adj, LUT_ADJ, m->adj_l,
                          lms_adj >= 0 ? lms_adj : -lms_adj);
+
+        have_context:
             ex[0] = stretch[4095 - (m->zero_p[zctx] >> 3)];
             ex[1] = stretch[4095 - (m->dir_p[dir_ctx] >> 3)];
             ex[2] = stretch[4095 - (m->diff_p[diff_ctx] >> 3)];
@@ -1064,7 +1347,10 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 }
             }
 
-            if (!first_row && x) {
+            /* These rows feed the weighted blend and nothing else, so they are
+             * dead work whenever it is off - and q0..q3 are only set inside
+             * the blend, so filling them without it would store nonsense. */
+            if (f_blend && !first_row && x) {
                 int64_t e0 = q0 - value, e1 = q1 - value;
                 int64_t e2 = q2 - value, e3 = q3 - value;
                 terr_cur[x + 1] = (int32_t)(pred - value);
@@ -1074,13 +1360,16 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 werr_cur[3 * w2 + x + 1] = (int32_t)(e3 >= 0 ? e3 : -e3);
             }
 
-            if (mval == value) {
-                match_pos++;
-                match_len++;
-            } else {
-                match_len = 0;
+            /* The flat history and the run counter exist for the match model. */
+            if (f_match) {
+                if (mval == value) {
+                    match_pos++;
+                    match_len++;
+                } else {
+                    match_len = 0;
+                }
+                m->flat[flat_n++] = (uint8_t)value;
             }
-            m->flat[flat_n++] = (uint8_t)value;
 
             cur[x] = (int32_t)value;
             cur_err[x] = (int32_t)mag;

@@ -154,6 +154,14 @@ void hve_code_block_info(int encode, hve_rc *rc, const uint8_t *data,
 
 int64_t hve_finish_encode(hve_rc *rc, uint8_t *out);
 
+/* The encoder derives a whole row of contexts up front when the model allows
+ * it. Switching that off must not change a single byte, which is what
+ * tests/test_cli_binary.py checks; nothing else has a reason to call this.
+ * Lives in kernel.c so the ctypes build in hve/native.py, which compiles only
+ * the kernel and the motion search, has it too. */
+void hve_set_batched(int on);
+int hve_batched_enabled(void);
+
 /* --- motion search (encoder only; see csrc/motion.c) --- */
 
 void hve_halfpel_planes(const uint8_t *ref, int64_t h, int64_t w, uint8_t *out);

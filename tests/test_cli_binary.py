@@ -434,3 +434,49 @@ def test_python_rejects_a_sliced_file_it_cannot_read(tmp_path):
     assert data[:4] == b"HVS1"
     with pytest.raises(ValueError):
         image.decode(data)
+
+
+# --------------------------------------------------------------------------
+# the batched context derivation
+#
+# The encoder derives a whole row of contexts up front when the model allows
+# it (see derive_row in csrc/kernel.c). That is a second implementation of the
+# context formation, and the Python byte-identity tests cannot reach it: they
+# compare against model.py, which implements only the full model, and the full
+# model switches batching off. So it is pinned here instead, both ways round -
+# against the scalar derivation directly, and through a decoder that only ever
+# uses the scalar one.
+
+
+@pytest.mark.parametrize("preset", ["fast", "max"])
+@pytest.mark.parametrize("h,w", [(64, 96), (29, 37), (17, 33), (1, 1)])
+def test_batched_derivation_matches_the_scalar_path(tmp_path, preset, h, w):
+    """Deriving a row up front must not change a single byte."""
+    frames = _synth_clip(h, w)
+    src = _write_y4m(str(tmp_path / "in.y4m"), frames, w, h)
+    on, off = str(tmp_path / "on.hvv"), str(tmp_path / "off.hvv")
+    run("encode", src, on, "--slices", "1", "--preset", preset, "--batched", "1")
+    run("encode", src, off, "--slices", "1", "--preset", preset, "--batched", "0")
+    with open(on, "rb") as a, open(off, "rb") as b:
+        assert a.read() == b.read()
+
+
+@pytest.mark.parametrize("h,w", [(29, 37), (17, 33), (2, 3)])
+def test_batched_encode_decodes_with_the_scalar_decoder(tmp_path, h, w):
+    """The decoder has no batched path, so a round trip cross-checks the two.
+
+    Odd sizes are the interesting ones: the derivation handles the first and
+    last column outside its main loop, and a chroma plane whose subsampling
+    does not divide evenly gets a block grid wider than the plane.
+    """
+    frames = _synth_clip(h, w)
+    src = _write_y4m(str(tmp_path / "in.y4m"), frames, w, h)
+    blob, back = str(tmp_path / "a.hvv"), str(tmp_path / "b.y4m")
+    run("encode", src, blob, "--slices", "1", "--preset", "fast")
+    run("decode", blob, back)
+    reader = y4m.Y4M(back)
+    got = [[p.copy() for p in f] for f in reader.frames()]
+    reader.close()
+    for want, have in zip(frames, got):
+        for a, b in zip(want, have):
+            assert np.array_equal(a, b)

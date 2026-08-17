@@ -353,6 +353,11 @@ int main(int argc, char **argv)
             /* Research knob: an explicit stage bitmask. The decoder reads it
              * back out of the header, so only encoding needs it. */
             features = strtoll(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--batched") && i + 1 < argc) {
+            /* Test knob, deliberately undocumented in --help: the encoder
+             * derives a whole row of contexts up front when the model allows
+             * it, and turning that off must not change a single byte. */
+            hve_set_batched(atoi(argv[++i]));
         } else if (argv[i][0] == '-' && argv[i][1]) {
             fprintf(stderr, "error: unknown option %s\n", argv[i]);
             return 2;
