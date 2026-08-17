@@ -464,26 +464,45 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
         const int first_row = (y == 0);
 
         if (inter_on) {
+            /* Walk blocks, not pixels. The per-pixel form needed an integer
+             * division by a runtime block size for every sample, which the
+             * compiler cannot strength-reduce; it was two of the hottest lines
+             * in the kernel. Everything but ref_x is constant across a block. */
             int64_t by = y / inter->bs_y;
             if (by >= nby)
                 by = nby - 1;
-            for (int64_t x = 0; x < width; x++) {
-                int64_t bx = x / inter->bs_x;
-                if (bx >= nbx)
-                    bx = nbx - 1;
-                if (inter->modes[by * nbx + bx] == 1) {
-                    int64_t hy = hve_fdiv(inter->mvs[(by * nbx + bx) * 2],
-                                          inter->mv_sy);
-                    int64_t hx = hve_fdiv(inter->mvs[(by * nbx + bx) * 2 + 1],
-                                          inter->mv_sx);
-                    int64_t ry = y + (hy >> 1);
-                    int64_t rx = x + (hx >> 1);
-                    mode_x[x] = 1;
-                    ref_p[x] = (uint8_t)((hy & 1) * 2 + (hx & 1));
-                    ref_y[x] = (int32_t)(ry < 0 ? 0 : (ry >= height ? height - 1 : ry));
-                    ref_x[x] = (int32_t)(rx < 0 ? 0 : (rx >= width ? width - 1 : rx));
-                } else {
-                    mode_x[x] = 0;
+            for (int64_t bx = 0; bx < nbx; bx++) {
+                int64_t x0 = bx * inter->bs_x, x1;
+                /* The grid is sized from luma, and a plane whose subsampling
+                 * does not divide evenly gets a grid wider than it is: odd
+                 * sizes make luma_w / chroma_w truncate to 1, so bs_x stays
+                 * 16 on a half-width plane. Blocks past the edge have no
+                 * pixels, and the last block with any keeps them all -- which
+                 * is what clamping bx to nbx - 1 used to do per pixel. */
+                if (x0 >= width)
+                    break;
+                x1 = (bx == nbx - 1) ? width : x0 + inter->bs_x;
+                if (x1 > width)
+                    x1 = width;
+                if (inter->modes[by * nbx + bx] != 1) {
+                    memset(mode_x + x0, 0, (size_t)(x1 - x0));
+                    continue;
+                }
+                int64_t hy = hve_fdiv(inter->mvs[(by * nbx + bx) * 2],
+                                      inter->mv_sy);
+                int64_t hx = hve_fdiv(inter->mvs[(by * nbx + bx) * 2 + 1],
+                                      inter->mv_sx);
+                int64_t ry = y + (hy >> 1), dx = hx >> 1;
+                uint8_t phase = (uint8_t)((hy & 1) * 2 + (hx & 1));
+                int32_t ryc = (int32_t)(ry < 0 ? 0
+                                        : (ry >= height ? height - 1 : ry));
+                memset(mode_x + x0, 1, (size_t)(x1 - x0));
+                for (int64_t x = x0; x < x1; x++) {
+                    int64_t rx = x + dx;
+                    ref_p[x] = phase;
+                    ref_y[x] = ryc;
+                    ref_x[x] = (int32_t)(rx < 0 ? 0
+                                         : (rx >= width ? width - 1 : rx));
                 }
             }
         }
