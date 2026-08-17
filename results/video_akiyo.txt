@@ -12,11 +12,11 @@ Ut Video done
 baselines: ffmpeg version 6.1.6 Copyright (c) 2000-2026 the FFmpeg developers
 
 codec                     bytes      ratio     enc s     dec s  verified
-hve                      316313      7.69x       0.3       0.2  lossless
+hve                      315981      7.70x       0.3       0.2  lossless
 x264 lossless            321053      7.58x       0.1         -  lossless
-x265 lossless            323443      7.52x       1.0         -  lossless
+x265 lossless            323443      7.52x       1.1         -  lossless
 AV1 lossless             329528      7.38x       0.6         -  lossless
-VP9 lossless             348041      6.99x       0.4         -  lossless
+VP9 lossless             348041      6.99x       0.5         -  lossless
 FFV1 (level 3)           745942      3.26x       0.1         -  lossless
 Ut Video                1117097      2.18x       0.0         -  lossless
 FFVHuff                 1126272      2.16x       0.0         -  lossless

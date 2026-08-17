@@ -61,6 +61,12 @@ WEIGHT_ONE = 1 << 16               # 16.16 fixed point; this weight passes an in
 class Mixer:
     """Gradient-descent logistic mixer with context-selected weight sets.
 
+    The learning rate is 24, not LPAQ's 7. That 7 was inherited along with the
+    rest of the design and never checked against this model; swept on the dev
+    split it is monotonically better out to about 24-32 for both presets, and
+    the win transferred to the held-out split (-0.086% on stills, -0.043% on
+    video) rather than being a dev-set artefact.
+
     `n` inputs, `nctx` independent weight vectors, weights in 16.16 fixed point.
 
     LPAQ starts every weight at zero and lets gradient descent find them. Here
@@ -70,7 +76,7 @@ class Mixer:
     there, instead of spending the first few thousand pixels relearning it.
     """
 
-    def __init__(self, n, nctx, rate=7):
+    def __init__(self, n, nctx, rate=24):
         self.n = n
         self.rate = rate
         weights = [0] * (n * nctx)
@@ -107,6 +113,10 @@ class Mixer:
 class APM:
     """Adaptive probability map, a.k.a. secondary symbol estimation.
 
+    Rate 8 rather than LPAQ's 7, for the same reason as Mixer above: swept on
+    the dev split it is a shallow optimum at 8-9 for both presets, and the win
+    held up on the held-out split (-0.034% on stills, -0.043% on video).
+
     Takes a probability the model already believes and refines it by what
     actually happened the last times this (context, probability bucket) pair came
     up. Buckets are spaced evenly on the stretch scale and adjacent ones are
@@ -116,7 +126,7 @@ class APM:
 
     BUCKETS = 33                   # 32 intervals of 128 stretch units, plus an end point
 
-    def __init__(self, nctx, rate=7):
+    def __init__(self, nctx, rate=8):
         self.rate = rate
         table = []
         for _ in range(nctx):

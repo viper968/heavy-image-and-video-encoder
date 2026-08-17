@@ -40,7 +40,14 @@ from . import mix, model
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CSRC = os.path.join(_ROOT, "csrc")
 _SOURCES = ("kernel.c", "motion.c")
-_HEADERS = ("hve.h",)
+# Every header the sources can pull in. Listing only some of them meant a
+# change to the generated constants did not invalidate the cached library, so
+# the Python path kept running the previous model while the standalone binary
+# ran the new one - which shows up as a byte-identity failure that looks like a
+# model bug and is not. Glob rather than enumerate, so a new header cannot be
+# forgotten.
+_HEADERS = tuple(sorted(
+    f for f in os.listdir(_CSRC) if f.endswith(".h"))) if os.path.isdir(_CSRC) else ()
 
 # -fwrapv matters for correctness, not speed: signed overflow is undefined in C
 # but Python's integers are arbitrary precision, and the mixer weights are the

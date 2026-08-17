@@ -58,16 +58,16 @@ held-out split (`tools/corpus.py`); no parameter has ever been fitted to them.
 
 | codec | bytes | bpp | ratio | cpu s | verified |
 |---|---:|---:|---:|---:|---|
-| JPEG XL, effort 9 | 7,207,847 | 8.15 | 2.95x | 60.0 | lossless |
-| JPEG XL, effort 7 | 7,305,646 | 8.26 | 2.91x | 14.8 | lossless |
-| **hve** | **7,711,460** | **8.72** | **2.75x** | **16.4** | lossless |
-| WebP lossless | 8,099,860 | 9.16 | 2.62x | 169.0 | lossless |
-| PNG (optimised) | 11,321,001 | 12.80 | 1.88x | 6.1 | lossless |
+| JPEG XL, effort 9 | 7,207,847 | 8.15 | 2.95x | 65.1 | lossless |
+| JPEG XL, effort 7 | 7,305,646 | 8.26 | 2.91x | 16.7 | lossless |
+| **hve** | **7,702,223** | **8.71** | **2.76x** | **17.5** | lossless |
+| WebP lossless | 8,099,860 | 9.16 | 2.62x | 184.7 | lossless |
+| PNG (optimised) | 11,321,001 | 12.80 | 1.88x | 6.2 | lossless |
 
 `cpu s` is encode **and** decode for all 18 images, measured the same way for
 every codec.
 
-31.9% smaller than PNG, 4.8% smaller than lossless WebP, 7.0% larger than
+31.9% smaller than PNG, 4.8% smaller than lossless WebP, 6.9% larger than
 JPEG XL. **JPEG XL is still ahead** — `docs/research.md` records what was tried
 against that gap, what each technique was worth when measured, and what is
 left.
@@ -93,7 +93,7 @@ error 55 — which is why nothing here is trusted on its label.)
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| **hve** | **316,313** | **7.69x** | lossless |
+| **hve** | **315,981** | **7.69x** | lossless |
 | x264 lossless (veryslow) | 321,053 | 7.58x | lossless |
 | x265 lossless (veryslow) | 323,443 | 7.52x | lossless |
 | AV1 lossless (libaom) | 329,528 | 7.38x | lossless |
@@ -110,7 +110,7 @@ High-motion content used to be where this lost. Same 16-frame test on
 
 | codec | bytes | ratio | verified |
 |---|---:|---:|---|
-| **hve** | **834,903** | **2.91x** | lossless |
+| **hve** | **834,251** | **2.91x** | lossless |
 | x264 lossless | 846,081 | 2.88x | lossless |
 | AV1 lossless | 851,838 | 2.86x | lossless |
 | x265 lossless | 852,986 | 2.85x | lossless |
@@ -153,10 +153,24 @@ property of the content.
 | VP9 lossless | 50,265 | 990x | 0.7 | lossless |
 | FFV1 level 3 | 521,316 | 95x | 0.2 | lossless |
 
-10.5% smaller than x264 and 29% smaller than AV1 — and now within **about 10x**
-of x264's encode time rather than the 50x this README used to claim, on a clip
-where it is also faster than AV1 and x265 were when this table was first
-written.
+10.5% smaller than x264 and 29% smaller than AV1.
+
+**On busy 1080p content it now beats x264 lossless on both axes at once.** That
+clip is nearly static, which flatters the ratio and understates the encode time,
+so here is `park_joy` — 16 frames of 1920x1080 that actually move — with every
+codec using all 16 cores:
+
+| codec | bytes | encode |
+|---|---:|---:|
+| **hve, 16 slices** | **22,497,649** | **1.38s** |
+| x264 lossless, veryslow | 23,108,086 | 2.35s |
+| x264 lossless, medium | 23,255,288 | 0.84s |
+| hve, 1 slice | 22,341,378 | 7.89s |
+
+2.6% smaller than x264 `veryslow` and 1.7x faster, for 0.69% against the
+single-slice encoder. `--slices` is what closed that gap; see "Slices" in
+`docs/research.md` for what it costs on other content, which is not always
+this cheap.
 
 That number has moved twice and the honest version of the story is:
 
@@ -321,7 +335,7 @@ are coded at their native subsampled size.
   correctness guarantee, not a usable mode — budget about a minute per Kodak
   photo. `tools/bench_image.py --jobs=N` parallelises across images, not within
   one.
-- **JPEG XL still wins on stills** by 7.0% on held-out images. Nineteen
+- **JPEG XL still wins on stills** by 6.9% on held-out images. Nineteen
   techniques have been built and measured against that gap; eight are in and
   eleven were rejected, several of them ideas the literature rates highly.
   Instrumenting the encoder showed the remaining gap was in prediction rather

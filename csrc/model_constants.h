@@ -12,8 +12,8 @@
 #include <stdint.h>
 
 /* --- container --- */
-#define HVI_MAGIC "HVI3"
-#define HVV_MAGIC "HVV2"
+#define HVI_MAGIC "HVI4"
+#define HVV_MAGIC "HVV3"
 #define HVE_FLAG_RCT 1
 
 /* --- video --- */
@@ -45,6 +45,8 @@
 #define HVE_PROB_INIT 16384
 #define HVE_WEIGHT_ONE 65536
 #define HVE_APM_BUCKETS 33
+#define HVE_MIX_RATE 24
+#define HVE_APM_RATE 8
 
 /* --- bank sizes, in the order hve/native.py binds them --- */
 #define HVE_N_ZERO 2688

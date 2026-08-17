@@ -39,14 +39,14 @@ Held-out split, 18 Kodak images never used for tuning
 
 | codec | bytes | cpu s |
 |---|---:|---:|
-| JPEG XL effort 9 | 7,207,847 | 60.0 |
-| **hve** | **7,711,460** | **16.4** |
-| WebP lossless | 8,099,860 | 169.0 |
-| PNG optimised | 11,321,001 | 6.1 |
+| JPEG XL effort 9 | 7,207,847 | 65.1 |
+| **hve** | **7,702,223** | **17.5** |
+| WebP lossless | 8,099,860 | 184.7 |
+| PNG optimised | 11,321,001 | 6.2 |
 
-31.9% under PNG, 4.8% under lossless WebP, **7.0% over JPEG XL**, and faster
+31.9% under PNG, 4.8% under lossless WebP, **6.9% over JPEG XL**, and faster
 than both of them. Video leads x264, x265, AV1 and VP9 on **both** test clips —
-akiyo 316,313 and foreman 834,903, the latter 1.3% ahead of x264 — and on 16
+akiyo 315,981 and foreman 834,251, the latter 1.3% ahead of x264 — and on 16
 frames of 1080p Sintel it is 10.5% under x264 at 30,944 bytes. See the README
 tables.
 
@@ -265,7 +265,13 @@ contradict what this document previously assumed:
 
 ## What to do next
 
-**There is a large item again, and it is measured.** See "Buying speed with
+**The three-step plan below is done.** Presets travel in the header, slices give
+16-way parallelism, and the constants have been re-swept per preset; the codec
+now beats x264 lossless on both size and speed at 1080p. What follows are the
+remaining open items. See "Slices", "Buying speed with ratio" and "Re-tuning
+after the presets" in `docs/research.md`.
+
+Historical context for the plan that produced this: see "Buying speed with
 ratio" in `docs/research.md`. In short: every model stage now has a switch
 (`params[P_FEATURES]`, `hve --features N`), and pricing them showed that on
 1080p video the match model, the learned combiner and the weighted blend are

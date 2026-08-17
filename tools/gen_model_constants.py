@@ -26,6 +26,16 @@ OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "csrc", "model_constants.h")
 
 
+def _default(fn, name):
+    """A keyword default, read rather than copied.
+
+    The mixer and APM learning rates were literals in csrc/kernel.c: if anyone
+    changed them in hve/mix.py the C would silently keep the old value and the
+    two implementations would disagree with nothing failing.
+    """
+    return inspect.signature(fn).parameters[name].default
+
+
 def _mv_penalty():
     """The flat price choose_modes charges for sending a vector.
 
@@ -99,7 +109,9 @@ def generate():
                         ("HVE_MATCH_HASH_MASK", model.MATCH_HASH_MASK),
                         ("HVE_PROB_INIT", rc.PROB_INIT),
                         ("HVE_WEIGHT_ONE", mix.WEIGHT_ONE),
-                        ("HVE_APM_BUCKETS", mix.APM.BUCKETS)):
+                        ("HVE_APM_BUCKETS", mix.APM.BUCKETS),
+                        ("HVE_MIX_RATE", _default(mix.Mixer.__init__, "rate")),
+                        ("HVE_APM_RATE", _default(mix.APM.__init__, "rate"))):
         add("#define %s %d" % (name, value))
     add("")
 

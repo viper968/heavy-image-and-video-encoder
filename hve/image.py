@@ -6,7 +6,7 @@ from . import model, native, rc
 from .bitio import Reader, Writer
 from .transform import predict_plane, rct_forward, rct_inverse, zigzag
 
-MAGIC = b"HVI3"
+MAGIC = b"HVI4"
 FLAG_RCT = 1
 
 # Which model bank each plane uses: luma, Cb, Cr, alpha.

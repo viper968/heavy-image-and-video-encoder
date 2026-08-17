@@ -13,7 +13,7 @@ from . import model, native, rc
 from .bitio import Reader, Writer
 from .transform import predict_plane, rct_forward, rct_inverse
 
-MAGIC = b"HVV2"
+MAGIC = b"HVV3"
 FLAG_RCT = 1
 BLOCK = 16
 SEARCH = 8              # full-pel search radius, in whole pixels

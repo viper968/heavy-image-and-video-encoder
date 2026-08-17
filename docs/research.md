@@ -743,6 +743,57 @@ exhaustive - 289 positions instead of about 43. Judging the pyramid by the whole
 frame rather than the strip took 16 slices from 1.92s to 0.90s. Area was always
 the wrong criterion; a thin wide strip is not a small picture.
 
+## Re-tuning after the presets: two inherited constants were wrong
+
+Every constant here was fitted with the full model switched on. The `fast`
+preset drops three stages, so `tools/sweep_preset.py` re-sweeps a constant and
+reports the dev split **separately for each preset**, rebuilding the binary per
+candidate value.
+
+The result was less dramatic than expected and interesting for a different
+reason: the constants that turned out to be wrong were wrong for *both* presets,
+because they had been inherited from LPAQ and never checked against this model
+at all.
+
+| constant | was | swept to | dev split |
+|---|---:|---:|---|
+| `rc.ADAPT_SHIFT` | 6 | **6** | already optimal, both presets |
+| `mix.Mixer` rate | 7 | **24** | -0.057% (max), -0.045% (fast) |
+| `mix.APM` rate | 7 | **8** | -0.036% (max), -0.041% (fast) |
+
+Both new values were then checked on the **held-out** split, which is the only
+number that counts:
+
+| | before | after | |
+|---|---:|---:|---:|
+| 18 held-out Kodak, max | 7,711,478 | 7,702,223 | **-0.120%** |
+| 18 held-out Kodak, fast | 7,913,577 | 7,906,274 | -0.092% |
+| 2 held-out clips, max | 1,151,218 | 1,150,232 | **-0.086%** |
+
+Small, but free - the same operations with a different constant - and it closes
+the JPEG XL gap from 6.99% to **6.86%**. The mixer rate sweep is monotone out to
+about 24-32 and then turns over, so LPAQ's 7 was not near the optimum for this
+model; it was simply never questioned. The APM optimum at 8-9 is shallow.
+
+A per-preset constant would have been possible - both sides know the preset from
+the header - but neither of these wanted a different value per preset, so both
+stay global.
+
+### A stale cache, caught by the byte-identity tests
+
+Changing a constant broke 27 tests, and the cause was not the model. `native.py`
+rebuilds its cached extension when a source file is newer, and its list of
+headers to watch contained only `hve.h` - so `model_constants.h` changing did
+not invalidate the cache. The Python path went on running the previous model
+while the standalone binary ran the new one.
+
+This is precisely the "stale C kernel means every number you measure comes from
+the old model" hazard that `docs/HANDOFF.md` warns about, and it took about
+fifteen minutes to find because the failure was loud and specific rather than a
+quietly worse ratio. The header list is now a glob, so a new header cannot be
+forgotten. Worth noting as the argument for keeping those tests expensive
+enough to be meaningful.
+
 ## The cost of a third implementation, and why there are two again
 
 Adding the C made three implementations of one loop: `model.py` defining the

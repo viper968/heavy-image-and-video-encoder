@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "hve.h"
+#include "model_constants.h"
 
 /* --------------------------------------------------------------------------
  * primitives, mirroring hve/rc.py and hve/mix.py
@@ -829,7 +830,7 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
             {
                 int64_t target = nonzero ? 65535 : 0;
                 if (f_mix) {
-                    int64_t err = ((nonzero << 12) - pr_mix) * 7;
+                    int64_t err = ((nonzero << 12) - pr_mix) * HVE_MIX_RATE;
                     mixw[mbase] += (ex[0] * err + 0x8000) >> 16;
                     mixw[mbase + 1] += (ex[1] * err + 0x8000) >> 16;
                     mixw[mbase + 2] += (ex[2] * err + 0x8000) >> 16;
@@ -837,9 +838,9 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                     mixw[mbase + 4] += (ex[4] * err + 0x8000) >> 16;
                 }
                 if (f_apm1)
-                    apm0[aupd] += (target - apm0[aupd]) >> 7;
+                    apm0[aupd] += (target - apm0[aupd]) >> HVE_APM_RATE;
                 if (f_apm2)
-                    apm2[aupd3] += (target - apm2[aupd3]) >> 7;
+                    apm2[aupd3] += (target - apm2[aupd3]) >> HVE_APM_RATE;
             }
 
             if (encode) {
@@ -905,12 +906,12 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                         m->nbc_p[cctx] = more ? p - (p >> adapt)
                                               : p + ((32768 - p) >> adapt);
                         if (f_nbmix) {
-                            nerr2 = ((more << 12) - pr_nbmix) * 7;
+                            nerr2 = ((more << 12) - pr_nbmix) * HVE_MIX_RATE;
                             nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16;
                             nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16;
                             nbmixw[nmb + 2] += (nb2 * nerr2 + 0x8000) >> 16;
                             t2 = more ? 65535 : 0;
-                            apm1[u2] += (t2 - apm1[u2]) >> 7;
+                            apm1[u2] += (t2 - apm1[u2]) >> HVE_APM_RATE;
                         }
                     }
                     if (nb >= 2) {
@@ -981,12 +982,12 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                         m->nbc_p[cctx] = more ? p - (p >> adapt)
                                               : p + ((32768 - p) >> adapt);
                         if (f_nbmix) {
-                            nerr2 = ((more << 12) - pr_nbmix) * 7;
+                            nerr2 = ((more << 12) - pr_nbmix) * HVE_MIX_RATE;
                             nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16;
                             nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16;
                             nbmixw[nmb + 2] += (nb2 * nerr2 + 0x8000) >> 16;
                             t2 = more ? 65535 : 0;
-                            apm1[u2] += (t2 - apm1[u2]) >> 7;
+                            apm1[u2] += (t2 - apm1[u2]) >> HVE_APM_RATE;
                         }
                         if (!more)
                             break;
