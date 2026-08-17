@@ -14,6 +14,18 @@
 #include "model_constants.h"
 #include "hvemodel.h"
 
+static int64_t g_features = -1;
+
+void hve_set_features(int64_t features)
+{
+    g_features = features;
+}
+
+int64_t hve_get_features(void)
+{
+    return g_features >= 0 ? g_features : HVE_PARAMS[P_FEATURES];
+}
+
 static int64_t *fill(size_t n, int64_t v)
 {
     int64_t *p = (int64_t *)malloc(n * sizeof(int64_t));
@@ -123,7 +135,11 @@ int hve_bank_init(hve_bank *m, int64_t luma_h, int64_t luma_w)
     LADDER(conf_l, HVE_LADDER_CONF);
     LADDER(adj_l, HVE_LADDER_ADJ);
 
-    m->m.params = HVE_PARAMS;
+    for (int i = 0; i < P_COUNT; i++)
+        m->params[i] = HVE_PARAMS[i];
+    if (g_features >= 0)
+        m->params[P_FEATURES] = g_features;
+    m->m.params = m->params;
     m->match_table = (int32_t *)calloc((size_t)HVE_MATCH_HASH_MASK + 1,
                                        sizeof(int32_t));
     m->flat = (uint8_t *)calloc((size_t)luma_h * luma_w, 1);

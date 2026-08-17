@@ -381,6 +381,14 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
     const int64_t lms_act_shift = params[P_LMSACTSHIFT];
     const int64_t lms_ndir = params[P_LMSNDIR];
     const int64_t nconf = m->conf_l.n + 1;
+    const int64_t feat = params[P_FEATURES];
+    const int f_blend = (feat & HVE_FEAT_BLEND) != 0;
+    const int f_lms   = (feat & HVE_FEAT_LMS) != 0;
+    const int f_match = (feat & HVE_FEAT_MATCH) != 0;
+    const int f_mix   = (feat & HVE_FEAT_MIX) != 0;
+    const int f_apm1  = (feat & HVE_FEAT_APM1) != 0;
+    const int f_apm2  = (feat & HVE_FEAT_APM2) != 0;
+    const int f_nbmix = (feat & HVE_FEAT_NBMIX) != 0;
 
     const int64_t k_zero = kind * nact * nerr * nlum;
     const int64_t k_nb = kind * nact * nerr * (max_nb + 1);
@@ -524,7 +532,7 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                     sgn = (d1 < 0 ? 0 : (d1 == 0 ? 1 : 2)) * 3
                         + (d2 < 0 ? 0 : (d2 == 0 ? 1 : 2));
 
-                    {
+                    if (f_blend) {
                         int64_t te_w = terr_cur[x];
                         int64_t te_n = terr_prev[x + 1];
                         int64_t te_nw = terr_prev[x];
@@ -573,7 +581,7 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                         pred = blend > 255 ? 255 : (blend < 0 ? 0 : blend);
                     }
 
-                    if (!(inter_on && mode_x[x])) {
+                    if (f_lms && !(inter_on && mode_x[x])) {
                         int64_t wwest = x >= 2 ? cur[x - 2] : west;
                         int64_t wwwest = x >= 3 ? cur[x - 3] : wwest;
                         int64_t nwwest = x >= 2 ? prev[x - 2] : nwest;
@@ -651,7 +659,7 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 }
             }
 
-            if (!first_row && x) {
+            if (f_match && !first_row && x) {
                 int64_t mhash = (((int64_t)west * 0x2F0FD693
                                   + (int64_t)north * 0x9E3779B1
                                   + (int64_t)nwest * 0x85EBCA77
@@ -746,23 +754,40 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
             ex[4] = stretch[4095 - (m->conf_p[conf_ctx] >> 3)];
             int64_t mix_ctx = kind_mix + act_b;
             int64_t mbase = mix_ctx * 5;
-            int64_t dot = ex[0] * mixw[mbase] + ex[1] * mixw[mbase + 1]
-                        + ex[2] * mixw[mbase + 2] + ex[3] * mixw[mbase + 3]
-                        + ex[4] * mixw[mbase + 4];
-            int64_t pr_mix = sq_of(sq, dot >> 16);
+            int64_t pr_mix;
+            if (f_mix) {
+                int64_t dot = ex[0] * mixw[mbase] + ex[1] * mixw[mbase + 1]
+                            + ex[2] * mixw[mbase + 2] + ex[3] * mixw[mbase + 3]
+                            + ex[4] * mixw[mbase + 4];
+                pr_mix = sq_of(sq, dot >> 16);
+            } else {
+                /* the primary context model alone, which is what the mixer's
+                 * expert 0 starts out as a copy of */
+                pr_mix = 4095 - (m->zero_p[zctx] >> 3);
+                if (pr_mix < 1)
+                    pr_mix = 1;
+            }
 
-            int64_t s = stretch[pr_mix] + 2048;
-            int64_t aw = s & 127;
-            int64_t aidx = mix_ctx * 33 + (s >> 7);
-            int64_t refined = (apm0[aidx] * (128 - aw) + apm0[aidx + 1] * aw) >> 11;
-            int64_t aupd = aidx + (aw >= 64 ? 1 : 0);
-            int64_t pr1 = (pr_mix + 3 * refined) >> 2;
-            int64_t s3 = stretch[pr1] + 2048;
-            int64_t aw3 = s3 & 127;
-            int64_t aidx3 = ((b_kind * 7 + mexp_b) * 4 + msign) * 33 + (s3 >> 7);
-            int64_t ref3 = (apm2[aidx3] * (128 - aw3) + apm2[aidx3 + 1] * aw3) >> 11;
-            int64_t aupd3 = aidx3 + (aw3 >= 64 ? 1 : 0);
-            pr1 = (pr1 + 3 * ref3) >> 2;
+            int64_t pr1 = pr_mix, aupd = 0, aupd3 = 0;
+            if (f_apm1) {
+                int64_t s = stretch[pr_mix] + 2048;
+                int64_t aw = s & 127;
+                int64_t aidx = mix_ctx * 33 + (s >> 7);
+                int64_t refined = (apm0[aidx] * (128 - aw)
+                                   + apm0[aidx + 1] * aw) >> 11;
+                aupd = aidx + (aw >= 64 ? 1 : 0);
+                pr1 = (pr_mix + 3 * refined) >> 2;
+            }
+            if (f_apm2) {
+                int64_t s3 = stretch[pr1] + 2048;
+                int64_t aw3 = s3 & 127;
+                int64_t aidx3 = ((b_kind * 7 + mexp_b) * 4 + msign) * 33
+                              + (s3 >> 7);
+                int64_t ref3 = (apm2[aidx3] * (128 - aw3)
+                                + apm2[aidx3 + 1] * aw3) >> 11;
+                aupd3 = aidx3 + (aw3 >= 64 ? 1 : 0);
+                pr1 = (pr1 + 3 * ref3) >> 2;
+            }
             if (pr1 < 1)
                 pr1 = 1;
             else if (pr1 > 4095)
@@ -800,15 +825,19 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                                               : p + ((32768 - p) >> adapt);
             }
             {
-                int64_t err = ((nonzero << 12) - pr_mix) * 7;
                 int64_t target = nonzero ? 65535 : 0;
-                mixw[mbase] += (ex[0] * err + 0x8000) >> 16;
-                mixw[mbase + 1] += (ex[1] * err + 0x8000) >> 16;
-                mixw[mbase + 2] += (ex[2] * err + 0x8000) >> 16;
-                mixw[mbase + 3] += (ex[3] * err + 0x8000) >> 16;
-                mixw[mbase + 4] += (ex[4] * err + 0x8000) >> 16;
-                apm0[aupd] += (target - apm0[aupd]) >> 7;
-                apm2[aupd3] += (target - apm2[aupd3]) >> 7;
+                if (f_mix) {
+                    int64_t err = ((nonzero << 12) - pr_mix) * 7;
+                    mixw[mbase] += (ex[0] * err + 0x8000) >> 16;
+                    mixw[mbase + 1] += (ex[1] * err + 0x8000) >> 16;
+                    mixw[mbase + 2] += (ex[2] * err + 0x8000) >> 16;
+                    mixw[mbase + 3] += (ex[3] * err + 0x8000) >> 16;
+                    mixw[mbase + 4] += (ex[4] * err + 0x8000) >> 16;
+                }
+                if (f_apm1)
+                    apm0[aupd] += (target - apm0[aupd]) >> 7;
+                if (f_apm2)
+                    apm2[aupd3] += (target - apm2[aupd3]) >> 7;
             }
 
             if (encode) {
@@ -835,19 +864,30 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                         int64_t nb1 = stretch[4095 - (m->nbm_p[mctx] >> 3)];
                         int64_t nb2 = stretch[4095 - (m->nbc_p[cctx] >> 3)];
                         int64_t nmb = mixc * 3;
-                        int64_t ndot = nb0 * nbmixw[nmb] + nb1 * nbmixw[nmb + 1]
-                                     + nb2 * nbmixw[nmb + 2];
-                        int64_t pr = sq_of(sq, ndot >> 16);
+                        int64_t pr;
+                        if (f_nbmix) {
+                            int64_t ndot = nb0 * nbmixw[nmb]
+                                         + nb1 * nbmixw[nmb + 1]
+                                         + nb2 * nbmixw[nmb + 2];
+                            pr = sq_of(sq, ndot >> 16);
+                        } else {
+                            pr = 4095 - (m->nb_p[ctx] >> 3);
+                            if (pr < 1)
+                                pr = 1;
+                        }
                         int64_t pr_nbmix = pr;
                         int64_t actx = kind_nbapm + i * nact + act_b;
-                        int64_t s2 = stretch[pr] + 2048;
-                        int64_t w2b = s2 & 127;
-                        int64_t i2 = actx * 33 + (s2 >> 7);
-                        int64_t ref2 = (apm1[i2] * (128 - w2b)
-                                        + apm1[i2 + 1] * w2b) >> 11;
-                        int64_t u2 = i2 + (w2b >= 64 ? 1 : 0);
+                        int64_t u2 = 0;
+                        if (f_nbmix) {
+                            int64_t s2 = stretch[pr] + 2048;
+                            int64_t w2b = s2 & 127;
+                            int64_t i2 = actx * 33 + (s2 >> 7);
+                            int64_t ref2 = (apm1[i2] * (128 - w2b)
+                                            + apm1[i2 + 1] * w2b) >> 11;
+                            u2 = i2 + (w2b >= 64 ? 1 : 0);
+                            pr = (pr + 3 * ref2) >> 2;
+                        }
                         int64_t p, nerr2, t2;
-                        pr = (pr + 3 * ref2) >> 2;
                         if (pr < 1)
                             pr = 1;
                         else if (pr > 4095)
@@ -862,12 +902,14 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                         p = m->nbc_p[cctx];
                         m->nbc_p[cctx] = more ? p - (p >> adapt)
                                               : p + ((32768 - p) >> adapt);
-                        nerr2 = ((more << 12) - pr_nbmix) * 7;
-                        nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16;
-                        nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16;
-                        nbmixw[nmb + 2] += (nb2 * nerr2 + 0x8000) >> 16;
-                        t2 = more ? 65535 : 0;
-                        apm1[u2] += (t2 - apm1[u2]) >> 7;
+                        if (f_nbmix) {
+                            nerr2 = ((more << 12) - pr_nbmix) * 7;
+                            nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16;
+                            nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16;
+                            nbmixw[nmb + 2] += (nb2 * nerr2 + 0x8000) >> 16;
+                            t2 = more ? 65535 : 0;
+                            apm1[u2] += (t2 - apm1[u2]) >> 7;
+                        }
                     }
                     if (nb >= 2) {
                         enc_bit(r, out, m->mant_p, b_mant + nb * 2,
@@ -898,19 +940,30 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                         int64_t nb1 = stretch[4095 - (m->nbm_p[mctx] >> 3)];
                         int64_t nb2 = stretch[4095 - (m->nbc_p[cctx] >> 3)];
                         int64_t nmb = mixc * 3;
-                        int64_t ndot = nb0 * nbmixw[nmb] + nb1 * nbmixw[nmb + 1]
-                                     + nb2 * nbmixw[nmb + 2];
-                        int64_t pr = sq_of(sq, ndot >> 16);
+                        int64_t pr;
+                        if (f_nbmix) {
+                            int64_t ndot = nb0 * nbmixw[nmb]
+                                         + nb1 * nbmixw[nmb + 1]
+                                         + nb2 * nbmixw[nmb + 2];
+                            pr = sq_of(sq, ndot >> 16);
+                        } else {
+                            pr = 4095 - (m->nb_p[ctx] >> 3);
+                            if (pr < 1)
+                                pr = 1;
+                        }
                         int64_t pr_nbmix = pr;
                         int64_t actx = kind_nbapm + nb * nact + act_b;
-                        int64_t s2 = stretch[pr] + 2048;
-                        int64_t w2b = s2 & 127;
-                        int64_t i2 = actx * 33 + (s2 >> 7);
-                        int64_t ref2 = (apm1[i2] * (128 - w2b)
-                                        + apm1[i2 + 1] * w2b) >> 11;
-                        int64_t u2 = i2 + (w2b >= 64 ? 1 : 0);
+                        int64_t u2 = 0;
+                        if (f_nbmix) {
+                            int64_t s2 = stretch[pr] + 2048;
+                            int64_t w2b = s2 & 127;
+                            int64_t i2 = actx * 33 + (s2 >> 7);
+                            int64_t ref2 = (apm1[i2] * (128 - w2b)
+                                            + apm1[i2 + 1] * w2b) >> 11;
+                            u2 = i2 + (w2b >= 64 ? 1 : 0);
+                            pr = (pr + 3 * ref2) >> 2;
+                        }
                         int64_t more, p, nerr2, t2;
-                        pr = (pr + 3 * ref2) >> 2;
                         if (pr < 1)
                             pr = 1;
                         else if (pr > 4095)
@@ -925,12 +978,14 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                         p = m->nbc_p[cctx];
                         m->nbc_p[cctx] = more ? p - (p >> adapt)
                                               : p + ((32768 - p) >> adapt);
-                        nerr2 = ((more << 12) - pr_nbmix) * 7;
-                        nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16;
-                        nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16;
-                        nbmixw[nmb + 2] += (nb2 * nerr2 + 0x8000) >> 16;
-                        t2 = more ? 65535 : 0;
-                        apm1[u2] += (t2 - apm1[u2]) >> 7;
+                        if (f_nbmix) {
+                            nerr2 = ((more << 12) - pr_nbmix) * 7;
+                            nbmixw[nmb] += (nb0 * nerr2 + 0x8000) >> 16;
+                            nbmixw[nmb + 1] += (nb1 * nerr2 + 0x8000) >> 16;
+                            nbmixw[nmb + 2] += (nb2 * nerr2 + 0x8000) >> 16;
+                            t2 = more ? 65535 : 0;
+                            apm1[u2] += (t2 - apm1[u2]) >> 7;
+                        }
                         if (!more)
                             break;
                         nb++;

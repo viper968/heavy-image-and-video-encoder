@@ -536,6 +536,139 @@ slices — two or four — rather than one per core, and making the count a head
 field so the encoder can choose it from the content rather than from the
 machine.
 
+## Buying speed with ratio: the model-stage ablation
+
+The goal here was explicitly speed — "ballpark of h264", with 10-15% ratio loss
+acceptable. So every stage of the model got a switch (`params[P_FEATURES]`, a
+bitmask; `hve --features N`) and was measured for what it costs in time and buys
+in ratio. Every configuration below was checked to still round-trip losslessly.
+
+kodim13, a busy photograph (baseline 564,475 bytes, 0.247s encode):
+
+| config | bytes | vs base | encode | decode |
+|---|---:|---:|---:|---:|
+| everything on | 564,475 | — | 0.247s | 0.268s |
+| -match | 566,650 | +0.39% | 0.173s | 0.195s |
+| -match -lms | 576,124 | +2.06% | 0.135s | 0.181s |
+| -match -lms -blend | 585,602 | +3.74% | 0.124s | 0.154s |
+| primary context only | 588,712 | +4.29% | 0.097s | 0.115s |
+
+**The entire context-mixing apparatus — mixer, both APM stages, the length-bin
+mixer, the learned combiner, the blend and the match model — is worth 4.29% on
+this image and costs 2.5x in time.** That is the central trade in this codec,
+and until now it had never been priced.
+
+Sintel 1080p x16 (baseline 30,944 bytes, 2.93s) tells a completely different
+story, and this is the surprise:
+
+| config | bytes | vs base | encode |
+|---|---:|---:|---:|
+| everything on | 30,944 | — | 2.93s |
+| -match | 28,643 | **-7.4%** | 2.96s |
+| -match -lms | 26,810 | **-13.4%** | 1.95s |
+| -match -lms -blend | 25,120 | **-18.8%** | 1.73s |
+| primary context only | 38,699 | +25.1% | 1.37s |
+
+Three stages are **actively harmful** on this content: dropping the match model,
+the learned combiner and the weighted blend makes the file **18.8% smaller and
+1.7x faster at the same time**. There is no trade to make — they are simply
+wrong here. The spatial prediction machinery was built and tuned on
+photographs, and on near-static high-resolution video where most blocks are
+temporally predicted it is modelling noise. Note that this finally explains the
+long-standing open item recorded above as "the match model costs 7.3% on 1080p
+Sintel": it was not a mystery about the match model, it was the whole spatial
+stack being mis-applied.
+
+The mixer and the APM stages, by contrast, are load-bearing everywhere: turning
+them off as well (`primary context only`) costs 25% on Sintel.
+
+### Combining the preset with slices
+
+Independent slices were measured earlier at +4.64% for four at 1080p. Applying
+both, against the current codec's 30,944 bytes at 2.93s, with parallel time
+estimated as the slowest slice:
+
+| config | bytes | vs today | wall time | speedup |
+|---|---:|---:|---:|---:|
+| today (all on, 1 slice) | 30,944 | — | 2.93s | 1.0x |
+| fast preset, 1 slice | 25,120 | -18.8% | 1.87s | 1.6x |
+| fast preset, 2 slices | 25,565 | -17.4% | 0.94s | 3.1x |
+| fast preset, 4 slices | 26,111 | **-15.6%** | 0.50s | **5.9x** |
+| fast preset, 8 slices | 27,094 | -12.4% | 0.46s | 6.4x |
+| fast preset, 16 slices | 29,006 | **-6.3%** | 0.31s | **9.5x** |
+
+x264 lossless on the same clip is **34,607 bytes in 0.3s**. So the fast preset
+at 16 slices reaches x264's encode speed while producing a file **16.2% smaller
+than x264 and still 6.3% smaller than this codec produces today**. At four
+slices it is 5.9x faster than today, 15.6% smaller than today, and 24.5%
+smaller than x264.
+
+The 10-15% ratio budget that was offered turns out not to be needed for video at
+all. For stills it is: the fast preset costs +3.74% there, so the feature set
+has to be **chosen per file and carried in the header**, not fixed globally.
+
+Two caveats. The wall-clock column assumes perfect thread scaling and ignores
+slice setup, so treat it as an upper bound; and this is one 1080p clip, chosen
+originally because it was the one that made encode time look bad. A busier 1080p
+clip would behave more like foreman, where the spatial stack does earn its cost.
+
+### What the literature says we should do instead of slices
+
+A survey of how the mainstream codecs get parallelism turned up one design that
+directly targets what these measurements say the cost actually is.
+
+Independent slices are expensive here for exactly one reason: **each slice has
+to relearn the model from scratch**, and the penalty tracks how much of the file
+is learned state. HEVC's Wavefront Parallel Processing does not reset. Each CTU
+row starts from a **copy of the entropy-coder state as it stood after the second
+CTU of the row above** — a checkpoint, not a reset — so the model stays warm and
+only the ramp-up costs anything. (Habermann et al., *Improved Wavefront Parallel
+Processing for HEVC Decoding*; the same paper measures the real dependency
+distances at under 1 CTU for context, 1.5 for intra prediction and 1.66 for
+motion vectors.) Published WPP scaling is 8.7x on 12 cores for 4K, against 9.3x
+for fully independent tiles — nearly the same parallelism for a fraction of the
+compression cost.
+
+That is the obvious next move for this codec, and it should be cheap precisely
+because our measured penalty is a relearning penalty.
+
+Two other findings worth recording:
+
+**Multi-symbol entropy coding.** AV1 replaced VP9's binary bool coder with a
+CDF-based multi-symbol coder over alphabets up to 16, and the AOM design paper
+claims "more than a factor 2 reduction in throughput cost for typical coding
+scenarios over pure binary arithmetic coding", framed as compression-neutral.
+This codec is entirely binary — every pixel is a chain of binary decisions — so
+the same restructuring is available in principle. No controlled ablation of the
+entropy coder alone was ever published, so the "compression-neutral" half is the
+design team's claim rather than an independently verified number.
+
+**Bypass bins are the cheap lever.** The single largest throughput win HEVC took
+over H.264's CABAC was moving bits out of context-coded mode into bypass
+(equiprobable, no context, no table lookup, several per cycle): a 25-31%
+BD-cycle reduction (Sze & Budagavi, IEEE SiPS 2013). This codec already bypasses
+the low mantissa bits; the sign bit and the upper mantissa bits are the obvious
+candidates to examine next.
+
+### Licensing: what could actually be borrowed
+
+The question was whether code could be taken from AV1, VP9, H.264 or H.265. This
+project is MIT, and the answer splits cleanly:
+
+| project | licence | borrowable into MIT? |
+|---|---|---|
+| libaom (AV1), libvpx (VP9), dav1d, rav1e | BSD-2/3-Clause + patent grant | **yes**, carrying the notices and PATENTS file |
+| SVT-AV1 | BSD-2-Clause, BSD-3-Clause-Clear from v0.9 | yes, check the version |
+| libjxl | BSD-3-Clause | yes (patent posture unverified) |
+| FFmpeg / FFV1 | LGPL-2.1-or-later | reference only, not copy-paste |
+| **x264, x265** | **GPL-2.0-or-later** | **no** — copyleft would take the whole project |
+
+So the H.264/H.265 implementations are off the table for source reuse, and the
+AV1/VP9 family is not. In practice the useful thing to borrow from them is
+design rather than code — the entropy-coder structure and the WPP/tile
+synchronisation rules are described in papers, and this codec's data structures
+look nothing like theirs.
+
 ## The cost of a third implementation, and why there are two again
 
 Adding the C made three implementations of one loop: `model.py` defining the

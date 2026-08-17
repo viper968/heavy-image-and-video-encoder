@@ -753,6 +753,27 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
     return rows, err_rows
 
 
+# Feature bits: which stages of the model are switched on.
+#
+# Every one of these costs time and buys ratio, and the trade is very different
+# per stage - see "Buying speed with ratio" in docs/research.md for the measured
+# table. They exist so a speed preset can drop the expensive stages, the way
+# x264 has --preset. The bitmask travels in the container header, so a decoder
+# always knows which model the encoder used.
+#
+# NOTE: hve/model.py's own code_plane implements only FEAT_ALL. It remains the
+# reference for the default preset; the C kernel is the definition for the rest.
+FEAT_BLEND = 1      # the four-way error-weighted sub-predictor blend
+FEAT_LMS = 2        # the 13-tap learned (NLMS) combiner
+FEAT_MATCH = 4      # the match model
+FEAT_MIX = 8        # the 5-expert logistic mixer on the zero flag
+FEAT_APM1 = 16      # first secondary-estimation stage
+FEAT_APM2 = 32      # second secondary-estimation stage, keyed on match state
+FEAT_NBMIX = 64     # mixer + APM on the magnitude bins
+FEAT_ALL = 127
+FEATURES = FEAT_ALL
+
+
 def coder_params():
     """The tunables the compiled backends read, as a flat array.
 
@@ -774,4 +795,5 @@ def coder_params():
         MATCH_HASH_MASK, rc.ADAPT_SHIFT, _video.MV_MAX,
         LMS_NPRED, LMS_WSHIFT, LMS_RATE, LMS_EPS,
         LMS_STEP_CLAMP, LMS_WCLAMP, NADJ, LMS_ACT_SHIFT, LMS_NDIR,
+        FEATURES,
     ], dtype=np.int64)

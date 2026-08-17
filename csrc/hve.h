@@ -75,8 +75,15 @@ enum {
     P_MATCHTRUST, P_WP1, P_WP2, P_WPSHIFT, P_W0, P_W1, P_W2, P_W3, P_HASHMASK,
     P_ADAPT, P_MVMAX,
     P_LMSN, P_LMSWSHIFT, P_LMSRATE, P_LMSEPS, P_LMSSTEP, P_LMSWCLAMP,
-    P_NADJ, P_LMSACTSHIFT, P_LMSNDIR,
+    P_NADJ, P_LMSACTSHIFT, P_LMSNDIR, P_FEATURES,
     P_COUNT
+};
+
+/* Feature bits in params[P_FEATURES]; see hve/model.py. */
+enum {
+    HVE_FEAT_BLEND = 1, HVE_FEAT_LMS = 2, HVE_FEAT_MATCH = 4,
+    HVE_FEAT_MIX = 8, HVE_FEAT_APM1 = 16, HVE_FEAT_APM2 = 32,
+    HVE_FEAT_NBMIX = 64, HVE_FEAT_ALL = 127
 };
 
 #define HVE_LMS_MAX 32          /* upper bound on LMS_NPRED, for stack arrays */

@@ -13,6 +13,7 @@
 
 typedef struct {
     hve_model m;
+    int64_t params[P_COUNT];    /* a mutable copy, so a preset can override */
     void *owned[20];            /* everything malloc'd for `m`, for one free */
     int32_t *match_table;
     uint8_t *flat;
@@ -22,6 +23,12 @@ typedef struct {
 } hve_bank;
 
 int hve_bank_init(hve_bank *m, int64_t luma_h, int64_t luma_w);
+
+/* Which model stages are switched on, as a bitmask of HVE_FEAT_*. Passing a
+ * negative value restores the built-in default. The encoder and decoder must
+ * agree, so this travels in the container header. */
+void hve_set_features(int64_t features);
+int64_t hve_get_features(void);
 int hve_bank_video(hve_bank *m);
 void hve_bank_free(hve_bank *m);
 

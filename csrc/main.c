@@ -11,6 +11,7 @@
 
 #include "hve.h"
 #include "hvefmt.h"
+#include "hvemodel.h"
 #include "model_constants.h"
 
 #ifndef HVE_VERSION
@@ -55,6 +56,8 @@ static void usage(FILE *fh)
         "options:\n"
         "  --frames N   stop after N video frames\n"
         "  --threads N  motion-search threads (default: one per core)\n"
+        "  --features N model stages bitmask (research knob; encode and\n"
+        "               decode must match)\n"
         "  -v           per-frame progress on stderr\n");
 }
 
@@ -243,6 +246,10 @@ int main(int argc, char **argv)
             frames = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
             hve_set_threads(atoi(argv[++i]));
+        } else if (!strcmp(argv[i], "--features") && i + 1 < argc) {
+            /* Research knob: which model stages run. Encoder and decoder must
+             * be given the same value, since it is not in the header yet. */
+            hve_set_features(strtoll(argv[++i], NULL, 0));
         } else if (argv[i][0] == '-' && argv[i][1]) {
             fprintf(stderr, "error: unknown option %s\n", argv[i]);
             return 2;

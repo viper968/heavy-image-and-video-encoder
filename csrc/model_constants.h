@@ -65,11 +65,11 @@
 #define HVE_N_APM2 7392
 
 /* --- tunables, indexed by the enum in csrc/hve.h --- */
-static const int64_t HVE_PARAMS[28] = {
+static const int64_t HVE_PARAMS[29] = {
     16, 7, 3, 5, 8, 25, 7, 7,
     8, 0, 0, 12, 13, 12, 12, 11,
     1048575, 6, 32, 13, 16, 5, 64, 65536,
-    1048576, 6, 1, 4,
+    1048576, 6, 1, 4, 127,
 };
 
 /* --- context ladders --- */

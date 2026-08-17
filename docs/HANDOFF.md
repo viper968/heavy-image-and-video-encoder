@@ -265,8 +265,32 @@ contradict what this document previously assumed:
 
 ## What to do next
 
-No single large item is identified any more. The honest options, roughly in
-order of expected value:
+**There is a large item again, and it is measured.** See "Buying speed with
+ratio" in `docs/research.md`. In short: every model stage now has a switch
+(`params[P_FEATURES]`, `hve --features N`), and pricing them showed that on
+1080p video the match model, the learned combiner and the weighted blend are
+*actively harmful* — dropping all three makes Sintel **18.8% smaller and 1.7x
+faster at once**. Combined with four independent slices that is 5.9x faster than
+today and still 15.6% smaller; at sixteen slices it matches x264's encode speed
+while producing a file 16.2% smaller than x264.
+
+The work that follows from that, in order:
+
+1. **Put the feature bitmask in the container header** and have the encoder
+   choose it. It cannot be a global constant: the same preset that wins 18.8% on
+   1080p video *costs* 3.74% on a photograph. This is a format change and it is
+   the prerequisite for everything else.
+2. **Wavefront parallelism rather than independent slices.** Our slicing penalty
+   is entirely a model-relearning penalty, and HEVC's WPP avoids exactly that by
+   copying the entropy state from after the second block of the row above
+   instead of resetting it. Published scaling is 8.7x on 12 cores against 9.3x
+   for fully independent tiles — nearly the same parallelism, far less loss.
+3. **Then re-tune.** The constants were all fitted with the full model switched
+   on; several of them are probably wrong for a preset that drops three stages.
+4. `hve/model.py` implements only `FEAT_ALL`. Either teach it the presets or
+   accept that the C kernel is the definition for everything else, and say so.
+
+The older options, still open, roughly in order of expected value:
 
 - **More nonlinear inputs to the combiner.** This is a falsifiable prediction
   rather than a hunch: the linear span is now well covered, so further gains

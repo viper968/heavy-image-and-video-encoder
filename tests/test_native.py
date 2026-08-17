@@ -290,4 +290,4 @@ def test_container_output_is_backend_independent():
 def test_params_array_matches_the_c_enum():
     """csrc/hve.h indexes `params` by a hand-written enum, so a mismatch in
     length means the C kernel is silently reading the wrong tunables."""
-    assert len(model.coder_params()) == 28
+    assert len(model.coder_params()) == 29
