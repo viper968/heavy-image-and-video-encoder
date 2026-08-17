@@ -302,15 +302,15 @@ are coded at their native subsampled size.
 ## Honest limitations
 
 - **The standalone binary is about shipping, not speed.** It removes Python
-  startup and numpy's import — a flat ~0.15s — so a small still encodes 1.7x
-  faster end to end (0.23s against 0.38s) while 16 frames of 1080p come out
-  only 5% faster (2.79s against 2.93s). That is the honest shape of it: the
+  startup and numpy's import — a flat ~0.15s — so a small still encodes 1.9x
+  faster end to end (0.17s against 0.32s) while 16 frames of 1080p come out
+  only 4% faster (2.69s against 2.79s). That is the honest shape of it: the
   Python path was already calling the same C kernel, so there was never much
   interpreter overhead left to remove. What the binary buys is a 1.1 MB
   executable that needs no interpreter, no numpy, no libpng and no zlib.
 - **Speed** (12th-gen i5, 16 cores, Python 3.14, core loop compiled from
-  `csrc/`): 16 CIF video frames encode in 0.42s and decode in 0.37s; 16 frames
-  of 1080p encode in 2.7s and decode in 2.6s. The **motion search is threaded**
+  `csrc/`): 16 CIF video frames encode in 0.31s and decode in 0.28s; 16 frames
+  of 1080p encode in 2.7s and decode in 2.5s. The **motion search is threaded**
   and costs almost nothing now (0.12s at 1080p), so encode time is essentially
   the pixel loop, which is **strictly serial and single-threaded** because every
   pixel depends on all prior ones. That is a property of the format, not of the

@@ -335,8 +335,9 @@ carried. The wider lesson is that this machine's noise floor is about 10% on a
 prediction holds exactly. One range coder, one adaptive model bank, and every
 pixel depending on all prior ones. The coding loop is now 2.5s of the 2.7s
 encode, so it *is* the remaining cost, and getting past it still needs the
-slice-independent format change described under "What would actually close the
-gap" — at a measured price of roughly 0.3-1% ratio.
+slice-independent format change, whose price is measured under "What is left in
+the serial loop" below and is a good deal less flat than this file used to
+assume.
 
 ### A search bug, found by diffing the port against the original
 
@@ -453,6 +454,87 @@ This is the third time in this project that C's integer semantics have differed
 from Python's in a way that compiles cleanly and produces wrong output rather
 than an error, after `/` versus `//` in the kernel and `>>` on negatives. The
 list in `docs/HANDOFF.md` is not academic.
+
+## What is left in the serial loop, and what parallelism would cost
+
+Two questions, answered by measurement rather than by estimate.
+
+### Without touching the format: about 20%, and then it is flat
+
+Profiling the standalone binary (which, unlike a dlopened .so, `perf` can
+resolve) put 96% of decode time in `hve_code_plane` with no dominant line
+inside it. The one structural item that stood out was **ladder lookups**: the
+pixel loop ran ten linear scans per sample over sorted arrays of up to fifteen
+entries, each an unpredictable branch. Every input is a small non-negative
+quantity with a known bound — a sum of three folded byte differences, a
+neighbour magnitude — so they tabulate into about 1.5 KB that stays in L1.
+
+Exact, format-preserving, and worth:
+
+| workload | before | after | |
+|---|---:|---:|---|
+| still encode (kodim05) | 0.245s | 0.189s | **-23%** |
+| CIF video encode x16 | 0.434s | 0.353s | **-19%** |
+| 1080p encode x16 | 2.840s | 2.786s | -1.9% |
+| 1080p decode x16 | 2.625s | 2.543s | -3.1% |
+
+The split is the interesting part. Sintel is near-static, so almost every
+residual is zero, the scans exit after an iteration or two, and there was
+little to remove. Content with real residuals walks much further down the
+ladders, which is where the 20% lives.
+
+Re-profiling afterwards showed a flat distribution: the match model's random
+table access at 4.4%, the combiner's dot product and update at ~9% together,
+the two APM interpolations at ~3%, the colour-transform decision at ~5% of a
+still encode. Nothing else is worth a targeted change, so **this is roughly the
+end of what implementation work can do.**
+
+### With a format change: cheap on photographs, expensive where it would help most
+
+The pixel loop is strictly serial — one range coder, one adaptive model, every
+pixel depending on all prior ones — so threading it needs independent slices,
+each with its own coder and model state and no prediction across its top edge.
+Earlier notes in this file estimated that at "0.3-1% ratio". That estimate was
+never measured. Measured, by encoding N independent horizontal strips and
+summing:
+
+| content | ratio | 2 slices | 4 slices | 8 slices | 16 slices |
+|---|---:|---:|---:|---:|---:|
+| 18 held-out Kodak | 2.75x | -0.04% | +0.52% | +1.42% | +2.84% |
+| foreman CIF x16 | 2.9x | +0.32% | +1.80% | +2.61% | — |
+| Sintel 1080p x16 | 1608x | +2.03% | +4.65% | +8.57% | +16.28% |
+
+So the old estimate was right only for stills at two or four slices, and badly
+wrong elsewhere.
+
+**The penalty tracks how much of the file is learned model state, not
+resolution.** Four slices, same clip length, across the whole video corpus:
+
+| clip | ratio | 4-slice penalty |
+|---|---:|---:|
+| mobile CIF | 2.0x | +2.13% |
+| bus CIF | 2.3x | +2.07% |
+| foreman CIF | 2.9x | +1.80% |
+| container CIF | 3.4x | +6.50% |
+| akiyo CIF | 7.7x | +14.62% |
+| Sintel 1080p | 1608x | +4.65% |
+
+Busy content pays about 2%; near-static content pays five to seven times that,
+because when the content is nearly free to code, what is left *is* the model
+converging, and each slice has to converge again from scratch. Sintel breaks
+the monotonic ordering because its slices are 1080p-sized and so have far more
+data to amortise that over — both terms matter, and neither alone predicts it.
+
+The practical consequence is awkward and worth stating plainly: **slicing costs
+least on the content that is already slowest to encode, and most on the content
+that is already fastest.** A 16-thread decode of photographic stills for 2.8%
+is a real option; a 16-thread decode of near-static video for 16% is not, and
+that is the case where 2.7 seconds actually hurts.
+
+If this is ever built, the shape the measurements support is a *small* number of
+slices — two or four — rather than one per core, and making the count a header
+field so the encoder can choose it from the content rather than from the
+machine.
 
 ## The cost of a third implementation, and why there are two again
 

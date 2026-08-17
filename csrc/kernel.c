@@ -314,6 +314,44 @@ static inline int64_t wt(const wtable *w, int k, int64_t a)
     return w->num[k] / (a + 4) + 4;
 }
 
+/* Ladder lookups, tabulated.
+ *
+ * hve_bisect is a linear scan, and the pixel loop does ten of them per sample
+ * over ladders of up to fifteen entries, every one an unpredictable branch.
+ * Every input is a small non-negative quantity with a known bound - a sum of
+ * three folded byte differences, a neighbour error, a residual magnitude - so
+ * the whole answer fits in a byte table small enough to stay in L1.
+ *
+ * Built by calling hve_bisect itself, and anything past the table falls back to
+ * it, so this stays exact no matter what the ladders are changed to.
+ */
+#define LUT_ACT  385        /* three folded byte differences */
+#define LUT_ERR  385        /* three neighbour magnitudes */
+#define LUT_SIDE 129        /* one neighbour magnitude */
+#define LUT_DIFF 256        /* |west - north| */
+#define LUT_LUM  129        /* one luma residual magnitude */
+#define LUT_MEXP 256        /* |match value - prediction| */
+#define LUT_ADJ  16         /* the combiner correction, which saturates early */
+
+typedef struct {
+    uint8_t act[LUT_ACT], err[LUT_ERR], side[LUT_SIDE], diff[LUT_DIFF];
+    uint8_t lum[LUT_LUM], mexp[LUT_MEXP], adj[LUT_ADJ];
+} ladder_luts;
+
+static void luts_init(ladder_luts *L, const hve_model *m)
+{
+    for (int i = 0; i < LUT_ACT; i++)  L->act[i]  = (uint8_t)hve_bisect(m->act_l, i);
+    for (int i = 0; i < LUT_ERR; i++)  L->err[i]  = (uint8_t)hve_bisect(m->err_l, i);
+    for (int i = 0; i < LUT_SIDE; i++) L->side[i] = (uint8_t)hve_bisect(m->side_l, i);
+    for (int i = 0; i < LUT_DIFF; i++) L->diff[i] = (uint8_t)hve_bisect(m->diff_l, i);
+    for (int i = 0; i < LUT_LUM; i++)  L->lum[i]  = (uint8_t)hve_bisect(m->lum_l, i);
+    for (int i = 0; i < LUT_MEXP; i++) L->mexp[i] = (uint8_t)hve_bisect(m->mexp_l, i);
+    for (int i = 0; i < LUT_ADJ; i++)  L->adj[i]  = (uint8_t)hve_bisect(m->adj_l, i);
+}
+
+#define LOOKUP(tbl, size, ladder, v) \
+    ((uint64_t)(v) < (size) ? (int64_t)(tbl)[(v)] : hve_bisect((ladder), (v)))
+
 int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                    const uint8_t *data, uint8_t *out, hve_rc *r, hve_model *m,
                    int64_t kind, int64_t use_luma, int64_t write_errmap,
@@ -375,6 +413,8 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
 
     wtable wtab;
     wtable_init(&wtab, params);
+    ladder_luts luts;
+    luts_init(&luts, m);
 
     /* One allocation for every row buffer, so a plane costs one malloc. */
     const int64_t w2 = width + 2;
@@ -480,7 +520,7 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                     d3 = ((north - neast + 128) & 255) - 128;
                     act = (d1 < 0 ? -d1 : d1) + (d2 < 0 ? -d2 : d2)
                         + (d3 < 0 ? -d3 : d3);
-                    act_b = hve_bisect(m->act_l, act);
+                    act_b = LOOKUP(luts.act, LUT_ACT, m->act_l, act);
                     sgn = (d1 < 0 ? 0 : (d1 == 0 ? 1 : 2)) * 3
                         + (d2 < 0 ? 0 : (d2 == 0 ? 1 : 2));
 
@@ -649,15 +689,18 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 if (x + 1 < width)
                     err_sum += prev_err[x + 1];
             }
-            int64_t sub = act_b * nerr + hve_bisect(m->err_l, err_sum);
+            int64_t sub = act_b * nerr
+                        + LOOKUP(luts.err, LUT_ERR, m->err_l, err_sum);
             int64_t lum = use_luma
-                ? hve_bisect(m->lum_l, m->errmap[y * m->errmap_stride + x]) : 0;
+                ? LOOKUP(luts.lum, LUT_LUM, m->lum_l,
+                         m->errmap[y * m->errmap_stride + x]) : 0;
             int64_t zctx = b_zero + sub * nlum + lum;
             int64_t nbbase = b_nb + sub * (max_nb + 1);
 
             int64_t dir_ctx = kind_dir
-                + (sgn * nside + hve_bisect(m->side_l, west_err)) * nside
-                + hve_bisect(m->side_l, north_err);
+                + (sgn * nside
+                   + LOOKUP(luts.side, LUT_SIDE, m->side_l, west_err)) * nside
+                + LOOKUP(luts.side, LUT_SIDE, m->side_l, north_err);
             int64_t diff_ctx;
             if (first_row || x == 0) {
                 diff_ctx = kind_diff;
@@ -665,8 +708,10 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 int64_t dwn = west - north;
                 int64_t dne = nwest - neast;
                 diff_ctx = kind_diff
-                    + hve_bisect(m->diff_l, dwn >= 0 ? dwn : -dwn) * ndiff
-                    + hve_bisect(m->diff_l, dne >= 0 ? dne : -dne);
+                    + LOOKUP(luts.diff, LUT_DIFF, m->diff_l,
+                             dwn >= 0 ? dwn : -dwn) * ndiff
+                    + LOOKUP(luts.diff, LUT_DIFF, m->diff_l,
+                             dne >= 0 ? dne : -dne);
             }
             int64_t match_ctx;
             if (mval < 0) {
@@ -687,12 +732,13 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 mexp = mval - pred;
                 msign = mexp < 0 ? 1 : (mexp == 0 ? 2 : 3);
                 ae = mexp >= 0 ? mexp : -mexp;
-                mexp_b = 1 + hve_bisect(m->mexp_l, ae);
+                mexp_b = 1 + LOOKUP(luts.mexp, LUT_MEXP, m->mexp_l, ae);
             }
 
             int64_t conf_b = hve_bisect(m->conf_l, energy);
             int64_t conf_ctx = kind_conf + conf_b * nadj
-                + hve_bisect(m->adj_l, lms_adj >= 0 ? lms_adj : -lms_adj);
+                + LOOKUP(luts.adj, LUT_ADJ, m->adj_l,
+                         lms_adj >= 0 ? lms_adj : -lms_adj);
             ex[0] = stretch[4095 - (m->zero_p[zctx] >> 3)];
             ex[1] = stretch[4095 - (m->dir_p[dir_ctx] >> 3)];
             ex[2] = stretch[4095 - (m->diff_p[diff_ctx] >> 3)];

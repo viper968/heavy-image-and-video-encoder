@@ -50,7 +50,7 @@ akiyo 316,313 and foreman 834,903, the latter 1.3% ahead of x264 — and on 16
 frames of 1080p Sintel it is 10.5% under x264 at 30,944 bytes. See the README
 tables.
 
-Video encode at 1080p is **2.7s warm against x264's ~0.3s**, roughly 10x. It was
+Video encode at 1080p is **2.7s against x264's ~0.3s**, roughly 10x. It was
 145s, then 9.8s warm after the search rewrite (the 19.8s once published for that
 included numba's cold compile), then 2.7s with the C backend. The motion search
 is now threaded and effectively free at 0.12s; the remaining time is the pixel
@@ -301,9 +301,14 @@ order of expected value:
   of which has been costed. Half-pel vectors are done and variable block sizes
   were measured and rejected.
 - **Video encode speed beyond the C port** now means the pixel loop and nothing
-  else — search is 0.12s of a 2.7s encode. Threading it needs the
-  slice-independent format change, at a measured cost of ~0.3-1% ratio. There is
-  no further single-threaded trick of the size already taken.
+  else — search is 0.12s of a 2.7s encode. Implementation work is close to done:
+  tabulating the ladder lookups was worth 19-23% on real content and a
+  re-profile afterwards is flat. Everything beyond that needs slices, and the
+  price is now measured rather than guessed: **+0.52% for 4 slices on stills but
+  +4.65% at 1080p and +14.62% on akiyo**, because the penalty tracks how much of
+  the file is learned model state. See "What is left in the serial loop" in
+  `docs/research.md` before proposing it — the old "0.3-1%" figure in this file
+  was never measured and was wrong.
 
 ## Honest framing
 
