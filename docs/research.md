@@ -561,6 +561,18 @@ and until now it had never been priced.
 Sintel 1080p x16 (baseline 30,944 bytes, 2.93s) tells a completely different
 story, and this is the surprise:
 
+> **This clip is not representative, and the conclusion below is overstated.**
+> 30,944 bytes for 16 frames of 1080p should have been the tell: the segment
+> starts at frame 0 of the trailer, and frames 0-7 are black. They encode to
+> 1,660 bytes and are byte-identical under every preset, so the ablation is
+> measuring almost nothing. On the trailer's genuinely busy segments the same
+> three stages **cost** 1.4% to 7.9% rather than saving 18.8%. The tables in
+> this subsection are left as measured, with the corrected figures in "What the
+> full trailer says" below.
+> The direction of the finding survives - the spatial stack does not earn its
+> cost on 1080p video - but the magnitude does not, and the speed-up is the
+> part that was actually worth having.
+
 | config | bytes | vs base | encode |
 |---|---:|---:|---:|
 | everything on | 30,944 | — | 2.93s |
@@ -581,6 +593,35 @@ stack being mis-applied.
 
 The mixer and the APM stages, by contrast, are load-bearing everywhere: turning
 them off as well (`primary context only`) costs 25% on Sintel.
+
+### What the full trailer says
+
+Six 16-frame segments taken across the whole 3.9GB trailer rather than one at
+frame 0, `max` against `fast`, one slice each:
+
+| segment | `max` bytes | `max` | `fast` bytes | `fast` | ratio | speed |
+|---|---:|---:|---:|---:|---:|---:|
+| @0s (black) | 36,849 | 2.66s | 25,067 | 1.37s | **-31.97%** | 1.94x |
+| @10s | 108,766 | 2.67s | 98,981 | 1.40s | -8.99% | 1.91x |
+| @45s | 294,267 | 2.93s | 289,779 | 1.59s | -1.52% | 1.85x |
+| @40s | 3,793,934 | 3.64s | 3,635,971 | 1.89s | -4.16% | 1.93x |
+| @30s | 5,527,928 | 4.30s | 5,966,835 | 2.20s | **+7.93%** | 1.96x |
+| @20s | 10,416,338 | 4.54s | 10,567,064 | 2.92s | +1.44% | 1.55x |
+
+The speed-up is the stable part: **1.55x to 1.96x everywhere**, because it comes
+from deleting work rather than from the content. The ratio is not stable at all,
+and the sign of it flips. On the two genuinely busy segments - the only ones
+where the file is big enough for the trade to matter in absolute bytes - the
+spatial stack *does* earn its cost, and dropping it costs 1.4% and 7.9%.
+
+Note it is not a clean function of how busy the content is: @40s at 237KB per
+frame prefers `fast` by 4.2%, while @30s at 345KB per frame prefers `max` by
+7.9%. So there is no cheap density heuristic that would let the encoder choose,
+which is a second, independent reason the `auto` preset was dropped.
+
+What survives from the original finding is the useful half: `fast` buys close to
+2x for a few percent, which is a good trade and the reason the preset exists. It
+is a trade, not the free win that a clip of black frames suggested.
 
 ### Combining the preset with slices
 
@@ -611,6 +652,16 @@ Two caveats. The wall-clock column assumes perfect thread scaling and ignores
 slice setup, so treat it as an upper bound; and this is one 1080p clip, chosen
 originally because it was the one that made encode time look bad. A busier 1080p
 clip would behave more like foreman, where the spatial stack does earn its cost.
+
+> **Both caveats turned out to be the whole story.** This table is built on the
+> same near-black clip, so every ratio column in it is wrong, including "16.2%
+> smaller than x264" - a 30,944-byte baseline is 8 black frames and 8 nearly
+> black ones. The wall-clock estimates were also optimistic: real 16-slice
+> encoding needed a thread-budget fix and a pyramid fix before it came close
+> (see "Slices" below). For the measured version of this comparison on content
+> that exercises the codec, see the park_joy table in `README.md`: 22,497,649
+> bytes in 1.38s against x264 lossless veryslow's 23,108,086 in 2.35s. The
+> conclusion held - it just had to be re-earned on real frames.
 
 ### What the literature says we should do instead of slices
 
@@ -793,6 +844,118 @@ fifteen minutes to find because the failure was loud and specific rather than a
 quietly worse ratio. The header list is now a glob, so a new header cannot be
 forgotten. Worth noting as the argument for keeping those tests expensive
 enough to be meaningful.
+
+## AV1's multi-symbol coder: measured, and it cannot pay here
+
+AV1 replaced VP9's binary arithmetic coder with the Daala multi-symbol coder,
+which codes one N-ary symbol against a CDF instead of N-1 binary decisions, and
+the AOM work reports better than 2x entropy-coding throughput for it. The
+obvious question is whether that transfers.
+
+It does not, and the reason is worth writing down, because the headline number
+is about a part of the codec that barely exists here.
+
+### The null-coder bound
+
+Rather than argue from a profile, delete the coder. A build with every range
+coder operation stubbed out - no renormalisation, no carry propagation, no bytes
+written, probability updates retained so the model still walks the same path -
+is an upper bound on *any* entropy-coder change, multi-symbol included. It
+produces garbage, which is fine, because the question is only how long it takes.
+
+16 frames of 1080p Sintel, one slice, encode:
+
+| | real coder | null coder | coder's share |
+|---|---:|---:|---:|
+| `fast` preset | 2.01s | 1.87s | **7.0%** |
+| `max` preset | 3.51s | 3.76s | *below the noise* |
+
+The `max` row came out negative - the build with less work in it ran slower -
+which is the useful part of the measurement: at that point code layout moves the
+number more than deleting the entropy coder does. Wall-clock noise on this loop
+is a few percent, so the later measurements here use retired cycles instead.
+
+So the ceiling for a perfect multi-symbol coder is seven percent, and a real one
+would not reach it. That alone settles it, but the profile says why.
+
+### Where the time actually goes
+
+`perf record` on the `fast` preset, attributed to source lines and bucketed by
+phase. `hve_code_plane` is 78% of samples; motion search is larger in CPU terms
+but runs on 16 threads, so it is small in wall-clock. Shares below are of the
+serial coding loop:
+
+| phase | share |
+|---|---:|
+| zero flag: 5 experts + mixer + 2 APM stages + update | **35.6%** |
+| context indices + ladder lookups | 19.7% |
+| prediction: MED, activity, blend, LMS, match | 15.1% |
+| LMS update and bookkeeping | 8.4% |
+| sign, exponent, mantissa coding | 8.4% |
+| inter reference addressing | 6.3% |
+| **range coder arithmetic** | **4.6%** |
+| ladder bisect and floor-division helpers | 1.5% |
+
+The entropy coder is under five percent. What AV1 actually buys with the
+multi-symbol coder is one *modelling* decision per symbol instead of per bit -
+and here the expensive decision, the zero flag, is already once per pixel. A
+multi-symbol coder cannot make it less than that. The only place the structure
+would fit is the exponent's unary chain, which is inside an 8.4% bucket.
+
+There is a deeper reason it does not transfer. The multi-symbol coder needs a
+CDF over the alphabet, cheap to look up and cheap to update. This codec's
+probabilities come from mixing five experts through a logistic mixer and two APM
+stages - a binary quantity by construction. Producing a CDF from a context
+mixer means running the mixer per bit anyway, which is the cost the change was
+supposed to remove.
+
+### What the ablation says about the ceiling for any model change
+
+The feature gates price the whole model at once. Same clip, one slice:
+
+| features | encode | bytes |
+|---|---:|---:|
+| `max` (127) | 3.60s | 3,793,934 |
+| `fast` (120) | 1.94s | **3,635,971** |
+| mixer only (8) | 1.59s | 3,660,905 |
+| NBMIX only (64) | 1.50s | 3,779,028 |
+| nothing (0) | 1.49s | 3,784,580 |
+
+Switching the entire model off saves 23% against the `fast` preset. That is the
+ceiling for *every* modelling change combined, including becoming AV1-shaped,
+and the remaining 1.49s is prediction, context formation and memory traffic.
+This codec is not entropy-coding-bound and it is not really model-bound either;
+it is bound by doing roughly 760 instructions of serial, data-dependent scalar
+work per sample.
+
+Two things follow. The first has been acted on: a per-sample integer division
+was sitting in that 6.3% addressing bucket, worth about 5% for free.
+
+### The structural one, not yet built or costed
+
+The loop is serial because each pixel's context depends on its neighbours'
+*decoded* values. On the encoder that constraint is imaginary: the codec is
+lossless, so decoded equals source, and the encoder has the whole source in
+hand before it codes anything.
+
+Every context index here is a pure function of source pixels - MED and GAP, the
+activity and sign bins, `err_sum`, the luma error map, the match hash, the LMS
+taps. Nothing in the context formation needs a coded bit. Only the
+probabilities themselves - the expert tables, mixer weights and APM bins - are
+order-dependent, and those are genuinely serial.
+
+So the encoder could split in two: a first pass computing predictions and
+context indices for a whole plane, which is local per pixel and vectorises, and
+a second serial pass doing only the model and the coding. That is roughly the
+prediction bucket plus much of the context bucket, so 25-35% of encode, and it
+changes no bits at all - the decoder is untouched and the format is untouched.
+
+Two caveats before anyone believes the number. The LMS filter and the match
+model adapt in scan order, so they stay sequential even in the first pass; only
+the local per-pixel work vectorises. And it helps the encoder only - the
+decoder genuinely cannot know a value before decoding it, so decode stays as it
+is, and decode is currently the same speed as encode. This is an estimate from
+the profile above, not a measurement, and nothing here has been built.
 
 ## The cost of a third implementation, and why there are two again
 

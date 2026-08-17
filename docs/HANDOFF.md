@@ -274,18 +274,25 @@ after the presets" in `docs/research.md`.
 Historical context for the plan that produced this: see "Buying speed with
 ratio" in `docs/research.md`. In short: every model stage now has a switch
 (`params[P_FEATURES]`, `hve --features N`), and pricing them showed that on
-1080p video the match model, the learned combiner and the weighted blend are
-*actively harmful* — dropping all three makes Sintel **18.8% smaller and 1.7x
-faster at once**. Combined with four independent slices that is 5.9x faster than
-today and still 15.6% smaller; at sixteen slices it matches x264's encode speed
-while producing a file 16.2% smaller than x264.
+1080p video the match model, the learned combiner and the weighted blend do not
+earn their cost — dropping all three is **1.55x to 1.96x faster** across the
+Sintel trailer, for somewhere between -32% and +7.9% on size depending entirely
+on the content.
+
+> The plan below was originally written around a much louder claim — "18.8%
+> smaller and 1.7x faster at once" — measured on 16 frames starting at frame 0
+> of the trailer, of which the first 8 are **black**. That number is wrong; on
+> the trailer's busy segments the three stages cost 1.4-7.9% rather than saving
+> 18.8%. The speed-up is real and content-independent, which is why the preset
+> still exists. Corrected tables are in "What the full trailer says" in
+> `docs/research.md`.
 
 The work that follows from that, in order:
 
 1. **Put the feature bitmask in the container header** and have the encoder
-   choose it. It cannot be a global constant: the same preset that wins 18.8% on
-   1080p video *costs* 3.74% on a photograph. This is a format change and it is
-   the prerequisite for everything else.
+   choose it. It cannot be a global constant: the preset that wins on sparse
+   1080p video *costs* 3.74% on a photograph and up to 7.9% on busy video. This
+   is a format change and it is the prerequisite for everything else.
 2. **Wavefront parallelism rather than independent slices.** Our slicing penalty
    is entirely a model-relearning penalty, and HEVC's WPP avoids exactly that by
    copying the entropy state from after the second block of the row above
@@ -330,6 +337,29 @@ The older options, still open, roughly in order of expected value:
 - **Multiple reference frames or bidirectional prediction** for video, neither
   of which has been costed. Half-pel vectors are done and variable block sizes
   were measured and rejected.
+- **A y4m frame rate does not survive a round trip.** `hve_y4m_read` parses the
+  `F` tag into a local buffer in `csrc/main.c` and then never passes it to the
+  encoder, and the container has no field for it, so every clip decodes as
+  `F25:1` regardless of what went in. `hve/y4m.py` has the same hole. Pixels are
+  lossless — only the header is lost — but the comment at the top of
+  `csrc/y4m.c` claims the rate *is* carried through, so the code and the comment
+  disagree. Fixing it means a field in the video header, i.e. another format
+  bump; worth folding into the next one rather than spending a bump on its own.
+- **Precomputing contexts on the encoder side.** The one structural speed idea
+  the profiling turned up, unbuilt and uncosted: the loop is serial because each
+  pixel's context depends on its neighbours' decoded values, but the codec is
+  lossless, so on the *encoder* decoded equals source and every context index is
+  a pure function of the input. Prediction and context formation could run as a
+  vectorisable pass over the whole plane before the serial coding pass. Estimated
+  25-35% of encode, no bitstream change, decoder untouched. Caveats in
+  `docs/research.md`.
+- ~~**AV1's multi-symbol entropy coder**~~ — **measured and ruled out.** A build
+  with the range coder stubbed out entirely — the upper bound on any coder
+  change — is only 7.0% faster on the `fast` preset and *within noise* on `max`.
+  The coder is 4.6% of the serial loop; the expensive decision, the zero flag's
+  five-expert mix, is already once per pixel and multi-symbol coding cannot make
+  it less. See "AV1's multi-symbol coder" in `docs/research.md` before
+  reconsidering.
 - **Video encode speed beyond the C port** now means the pixel loop and nothing
   else — search is 0.12s of a 2.7s encode. Implementation work is close to done:
   tabulating the ladder lookups was worth 19-23% on real content and a

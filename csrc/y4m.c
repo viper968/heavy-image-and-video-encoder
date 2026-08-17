@@ -1,8 +1,14 @@
 /* Minimal YUV4MPEG2 reader and writer, mirroring hve/y4m.py.
  *
  * Only the tags that change how the bytes are laid out are honoured: width,
- * height and colour space. The frame rate is carried through so a round trip
- * does not silently change the playback speed.
+ * height and colour space.
+ *
+ * The frame rate is parsed and can be handed back to the writer, but nothing
+ * currently carries it between the two: the container has no field for it, so
+ * `hve encode` reads the `F` tag into a local and drops it, and every decode
+ * writes F25:1. Pixels round-trip exactly; the playback rate does not. Fixing
+ * that needs a header field and therefore a format bump - see the note in
+ * docs/HANDOFF.md.
  */
 
 #include <stdlib.h>
