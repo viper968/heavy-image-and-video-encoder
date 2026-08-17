@@ -23,12 +23,11 @@
  * so the output, which is a compression experiment rather than a port.
  */
 
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "hve.h"
+#include "thread.h"
 
 #define MAXLEV 8
 
@@ -161,7 +160,7 @@ typedef struct {
     int32_t *mv_out;
     int64_t *cost_out;
     int64_t next_row;
-    pthread_mutex_t lock;
+    hve_mutex lock;
 } search_job;
 
 static void search_block(const search_job *j, int64_t by, int64_t bx)
@@ -238,16 +237,16 @@ static void search_block(const search_job *j, int64_t by, int64_t bx)
     j->cost_out[by * j->nbx + bx] = best;
 }
 
-static void *search_worker(void *arg)
+static HVE_WORKER(search_worker, arg)
 {
     search_job *j = (search_job *)arg;
     for (;;) {
         int64_t by;
-        pthread_mutex_lock(&j->lock);
+        hve_mutex_lock(&j->lock);
         by = j->next_row++;
-        pthread_mutex_unlock(&j->lock);
+        hve_mutex_unlock(&j->lock);
         if (by >= j->nby)
-            return NULL;
+            HVE_WORKER_RETURN;
         for (int64_t bx = 0; bx < j->nbx; bx++)
             search_block(j, by, bx);
     }
@@ -255,21 +254,21 @@ static void *search_worker(void *arg)
 
 static void run_threaded(search_job *j, int nthreads)
 {
-    pthread_t tid[64];
+    hve_thread tid[64];
     int made = 0;
     j->next_row = 0;
-    pthread_mutex_init(&j->lock, NULL);
+    hve_mutex_init(&j->lock);
     if (nthreads > 64)
         nthreads = 64;
     if (nthreads < 1)
         nthreads = 1;
     for (int i = 0; i < nthreads - 1; i++)
-        if (pthread_create(&tid[made], NULL, search_worker, j) == 0)
+        if (hve_thread_start(&tid[made], search_worker, j) == 0)
             made++;
     search_worker(j);
     for (int i = 0; i < made; i++)
-        pthread_join(tid[i], NULL);
-    pthread_mutex_destroy(&j->lock);
+        hve_thread_join(tid[i]);
+    hve_mutex_free(&j->lock);
 }
 
 int hve_motion_search(const uint8_t *cur, const uint8_t *ref,
@@ -366,7 +365,7 @@ typedef struct {
     int64_t h, w, bs, nby, nbx;
     int64_t *cost_out;
     int64_t next_row;
-    pthread_mutex_t lock;
+    hve_mutex lock;
 } spatial_job;
 
 /* MED prediction with the same edge fallbacks transform.predict_plane uses:
@@ -392,16 +391,16 @@ static inline int med_pred(const uint8_t *cur, int64_t w, int64_t y, int64_t x)
     return planar < 0 ? 0 : (planar > 255 ? 255 : planar);
 }
 
-static void *spatial_worker(void *arg)
+static HVE_WORKER(spatial_worker, arg)
 {
     spatial_job *j = (spatial_job *)arg;
     for (;;) {
         int64_t by;
-        pthread_mutex_lock(&j->lock);
+        hve_mutex_lock(&j->lock);
         by = j->next_row++;
-        pthread_mutex_unlock(&j->lock);
+        hve_mutex_unlock(&j->lock);
         if (by >= j->nby)
-            return NULL;
+            HVE_WORKER_RETURN;
         for (int64_t bx = 0; bx < j->nbx; bx++) {
             int64_t total = 0;
             int64_t y0 = by * j->bs, x0 = bx * j->bs;
@@ -420,7 +419,7 @@ int hve_spatial_cost(const uint8_t *cur, int64_t h, int64_t w, int64_t bs,
                      const int32_t *cost_tbl, int64_t *cost_out, int nthreads)
 {
     spatial_job j;
-    pthread_t tid[64];
+    hve_thread tid[64];
     int made = 0;
 
     memset(&j, 0, sizeof(j));
@@ -432,27 +431,30 @@ int hve_spatial_cost(const uint8_t *cur, int64_t h, int64_t w, int64_t bs,
     j.nby = (h + bs - 1) / bs;
     j.nbx = (w + bs - 1) / bs;
     j.cost_out = cost_out;
-    pthread_mutex_init(&j.lock, NULL);
+    hve_mutex_init(&j.lock);
     if (nthreads > 64)
         nthreads = 64;
     if (nthreads < 1)
         nthreads = 1;
     for (int i = 0; i < nthreads - 1; i++)
-        if (pthread_create(&tid[made], NULL, spatial_worker, &j) == 0)
+        if (hve_thread_start(&tid[made], spatial_worker, &j) == 0)
             made++;
     spatial_worker(&j);
     for (int i = 0; i < made; i++)
-        pthread_join(tid[i], NULL);
-    pthread_mutex_destroy(&j.lock);
+        hve_thread_join(tid[i]);
+    hve_mutex_free(&j.lock);
     return 0;
+}
+
+static int g_threads = 0;
+
+void hve_set_threads(int n)
+{
+    g_threads = n > 0 ? n : 0;
 }
 
 int hve_threads_default(void)
 {
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
-    if (n < 1)
-        n = 1;
-    if (n > 64)
-        n = 64;
-    return (int)n;
+    int n = g_threads > 0 ? g_threads : hve_cpu_count();
+    return n > 64 ? 64 : n;
 }

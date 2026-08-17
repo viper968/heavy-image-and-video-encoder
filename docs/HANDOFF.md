@@ -5,8 +5,8 @@ then whichever of the three documents below matches what you are about to do.
 Update this file when the state it describes stops being true; a stale handoff
 is worse than none.
 
-**Last verified: the C backend and the removal of the numba path, all 72
-tests green, benchmarks in `results/` regenerated against it.**
+**Last verified: the standalone C binary, all 96 tests green. Byte counts
+unchanged, so `results/` was not regenerated — nothing in it moved.**
 
 ## What this is
 
@@ -85,6 +85,10 @@ Pillow installed system-wide, and it fails on a clean clone.
   is newer, so there is no build step to remember. With no compiler the codec
   falls back to the pure-Python reference: still correct, roughly 100x slower,
   about a minute per Kodak photo. Treat that as a guarantee, not a usable mode.
+- `make -C csrc` builds the **standalone binary** at `build/hve` — no Python,
+  no numpy, no libpng. `make -C csrc static` for a 1.1 MB shippable one,
+  `windows` to cross-compile (written, never run). It is the thing to hand
+  someone; the Python package is the thing to experiment in.
 - Run everything as `.venv/bin/python`. Bare `python3` lacks imagecodecs and may
   not find the built library, and the codec will silently use the slow path.
 - Git pushes need `gh auth setup-git` once.
@@ -111,6 +115,15 @@ There was a third, `hve/fast.py`, in numba. It was deleted after the C landed �
 all five model changes in this repo's history had to be mirrored into it by
 hand, and it had stopped adding coverage. Do not add it back without reading
 "The cost of a third implementation" in `docs/research.md`.
+
+**Everything *outside* the pixel loop also exists twice**, since the standalone
+binary has its own containers, colour transform and y4m. That is a much cheaper
+bargain — a magic string, four varints and a colour transform, all rarely
+touched and pinned byte-for-byte by `tests/test_cli_binary.py`. The part that
+would have been dangerous, the model constants, is **generated**: run
+`.venv/bin/python tools/gen_model_constants.py` after changing any constant, or
+`tests/test_generated_constants.py` will tell you. Never hand-edit
+`csrc/model_constants.h`.
 
 Practical workflow that works well:
 
@@ -161,6 +174,11 @@ Gotchas that have already caused wrong measurements:
   and the shift must stay arithmetic so negative vectors floor to the correct
   side. Chroma divides the luma vector by its subsampling factor *first*.
   Anything that reads `mvs` and forgets the units is off by a factor of two.
+- **Ceiling division.** Python's `-(-a // b)` transcribes into C as
+  `-(-a / b)`, which looks right and is wrong, because `/` truncates toward
+  zero where `//` floors. Use `hve_ceil_div`. This is not hypothetical: it gave
+  a 1080p frame 67 block rows instead of 68 and corrupted the heap, and it hid
+  for a whole session because every clip in `testdata/` divides exactly by 16.
 - **C's integer semantics are not Python's**, and both differences are silent.
   `/` truncates toward zero where `//` floors, so every division whose numerator
   can go negative uses `hve_fdiv()`; `>>` on a negative value is
@@ -203,6 +221,19 @@ Two things fell out of writing it that matter more than the speed:
    boundary is expensive to *send* — magnitudes are unary — and the search's
    cost proxy scores residuals only. Rate-aware search is now the most concrete
    untried motion idea. See below.
+
+**Then the whole program was ported to C** (`csrc/container.c`, `transform.c`,
+`y4m.c`, `imageio.c`, `main.c`), producing a standalone `build/hve` with no
+Python in it. Byte-identical output on every test, and each side reads the
+other's files. Honest accounting: the speed gain is a flat ~0.15s of removed
+interpreter startup, which is 1.7x on a small still and **5% at 1080p** — the
+Python path was already calling the same C kernel. The value is distribution:
+1.1 MB static, no interpreter, no numpy, no libpng, no zlib.
+
+That round found a heap corruption (ceiling division, see above) and one
+representation bug: lodepng's encoder auto-picks the smallest colour type, so
+a uniform RGB image came back as a 1-bit palette PNG — lossless in pixels, but
+not what was handed in. `auto_convert` is off now.
 
 Before that, two rounds that closed items this file used to name as open.
 

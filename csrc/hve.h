@@ -165,4 +165,7 @@ int hve_spatial_cost(const uint8_t *cur, int64_t h, int64_t w, int64_t bs,
 
 int hve_threads_default(void);
 
+/* Override the core count the search uses; 0 restores the default. */
+void hve_set_threads(int n);
+
 #endif /* HVE_H */

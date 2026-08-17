@@ -19,11 +19,34 @@ PNG and .y4m the core CLI takes:
 
 Picking this up to work on it? Read `docs/HANDOFF.md` first.
 
+## Use it
+
+There is a standalone binary with no Python in it at all — no interpreter, no
+numpy, no libpng, no zlib. One C compiler and `make`:
+
+```
+make -C csrc                        # -> build/hve   (or `make -C csrc static`)
+./build/hve encode photo.png photo.hvi
+./build/hve decode photo.hvi restored.png     # byte-identical pixels
+./build/hve info   photo.hvi
+./build/hve encode clip.y4m clip.hvv --frames 60
+```
+
+Statically linked it is 1.1 MB and depends on nothing. `make -C csrc windows`
+cross-compiles a `.exe` with mingw-w64 (written but **not yet tested** — see
+`csrc/Makefile`).
+
+The Python package does the same thing and is what the research tooling uses:
+
 ```
 python -m hve encode photo.png photo.hvi
-python -m hve decode photo.hvi restored.png     # byte-identical pixels
+python -m hve decode photo.hvi restored.png
 python -m hve info   photo.hvi
 ```
+
+The two produce **byte-identical files** and read each other's output;
+`tests/test_cli_binary.py` checks that on every shape it can think of. Use the
+binary to ship, the package to experiment.
 
 ## Results
 
@@ -278,6 +301,13 @@ are coded at their native subsampled size.
 
 ## Honest limitations
 
+- **The standalone binary is about shipping, not speed.** It removes Python
+  startup and numpy's import — a flat ~0.15s — so a small still encodes 1.7x
+  faster end to end (0.23s against 0.38s) while 16 frames of 1080p come out
+  only 5% faster (2.79s against 2.93s). That is the honest shape of it: the
+  Python path was already calling the same C kernel, so there was never much
+  interpreter overhead left to remove. What the binary buys is a 1.1 MB
+  executable that needs no interpreter, no numpy, no libpng and no zlib.
 - **Speed** (12th-gen i5, 16 cores, Python 3.14, core loop compiled from
   `csrc/`): 16 CIF video frames encode in 0.42s and decode in 0.37s; 16 frames
   of 1080p encode in 2.7s and decode in 2.6s. The **motion search is threaded**
@@ -317,12 +347,18 @@ hve/mix.py          logistic mixing + secondary estimation (stretch/squash, Mixe
 hve/model.py        weighted predictor, learned combiner, match model, context
                     model, residual binarisation — the readable reference,
                     shared by image+video
-hve/native.py       loads and binds the C backend; builds it on first import
-csrc/kernel.c       the same loop in C, for stills and video alike, pinned
+hve/native.py       loads and binds the C kernel; builds it on first import
+csrc/kernel.c       the pixel loop in C, for stills and video alike, pinned
                     byte-identical to model.py by tests — this is what runs
 csrc/motion.c       threaded motion search (encoder only, no format impact)
 csrc/hve.h          shared structs, and the floor-division and shift helpers
                     that keep C's integer semantics matching Python's
+csrc/container.c    the .hvi and .hvv containers
+csrc/transform.c    RCT and the entropy proxy that decides whether to use it
+csrc/y4m.c, imageio.c, util.c, main.c    y4m, PNG, buffers, the CLI
+csrc/model_constants.h   GENERATED from model.py by tools/gen_model_constants.py
+csrc/third_party/   vendored lodepng (zlib licence), so PNG needs no libpng
+build/hve           the standalone binary (gitignored; `make -C csrc`)
 hve/image.py        .hvi still-image container
 hve/video.py        .hvv video container, motion search, block modes
 hve/transform.py    RCT, MED predictor, context quantisation
@@ -341,8 +377,9 @@ playground/         setup + a friendly CLI for trying it on ordinary jpg/mp4
 docs/HANDOFF.md     start here: state, environment, workflow, what to do next
 docs/research.md    every technique surveyed and what it measured — including the
                     eight that were built and rejected
-tests/              72 tests: roundtrips, edge cases, coder internals, and
-                    byte-exactness between the C kernel and the reference
+tests/              96 tests: roundtrips, edge cases, coder internals,
+                    byte-exactness between the C kernel and the reference, and
+                    between the standalone binary and the Python package
 ```
 
 ## Running it

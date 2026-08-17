@@ -376,6 +376,84 @@ optimisation here and charge each candidate its actual coding cost. That has
 never been tried in this codec and is now the most concrete untried motion idea,
 ahead of multiple reference frames.
 
+## The whole program in C, and what that was and was not worth
+
+`csrc/` now builds a standalone `hve` binary: containers, colour transform,
+y4m, PNG and CLI, with no Python anywhere. Output is byte-identical to the
+Python package on every test — all 24 Kodak images, the CIF clips, 1080p
+Sintel — and each side reads the other's files.
+
+**The speed answer is: almost none, and that was predictable.** Measured
+before starting, only 15% of a still encode and less of a video encode was
+still Python; the rest was already the C kernel. What the binary actually
+removes is interpreter startup plus numpy's import, a flat ~0.15 seconds:
+
+| job | binary | python | |
+|---|---:|---:|---|
+| still encode (768x512) | 0.23s | 0.38s | 1.7x |
+| still decode | 0.26s | 0.40s | 1.5x |
+| 1080p x16 encode | 2.79s | 2.93s | **1.05x** |
+| 1080p x16 decode | 2.73s | 2.87s | 1.05x |
+
+The relative win is entirely a function of how small the job is. Anyone quoting
+the 1.7x without saying it is startup is quoting a constant, not a speedup.
+
+**What it is actually worth is distribution.** 1.1 MB statically linked, no
+interpreter, no numpy, no libpng, no zlib, no install step. PNG comes from a
+vendored lodepng (zlib licence, one file); the alternative was making users
+have libpng and cross-building it for Windows. A Windows target exists and is
+written to be correct, but has never been run — there is no mingw-w64 on this
+machine and no way to install one, and saying "it cross-compiles" without
+having done it would be a claim rather than a result.
+
+### The duplication this adds, and why it is a different bargain
+
+Everything outside the pixel loop now exists twice: containers, RCT, y4m. That
+is the same shape of problem as the numba path, with a different answer, and
+the difference is worth being explicit about.
+
+The numba mirror was 995 lines of adaptive model that had to be re-derived by
+hand on every change. The container is a magic string, four varints and a
+colour transform — small, totally specified, and it changes almost never. Both
+directions are pinned by `tests/test_cli_binary.py`, which encodes the same
+input through both and compares bytes.
+
+The genuinely dangerous part is the *constants*: every ladder, tunable and
+lookup table the model uses. Retyping those into C is the worst kind of
+duplication, because one wrong digit does not fail to compile — it silently
+produces a different model, and the only symptom is a slightly worse ratio. So
+they are not retyped. `tools/gen_model_constants.py` emits
+`csrc/model_constants.h` from the Python definitions, including the 4096-entry
+stretch and squash tables and the motion-search cost table, and
+`tests/test_generated_constants.py` fails if the checked-in header is stale.
+Even `mv_penalty`, which is a default argument rather than a module constant,
+is read out of the function signature rather than copied.
+
+The one thing that could not be generated is the colour-transform decision,
+which compares two floating-point entropies. A last-ulp difference between C's
+`log2` and numpy's could in principle flip it. Measured across the 24 Kodak
+images, the narrowest margin between the two candidates is **17%**, so it
+cannot; that is a fact about the data, not a proof, and it is written down in
+`csrc/transform.c` so the next person knows what would break it.
+
+### A heap corruption that only 1080p could find
+
+Ceiling division. Python spells it `-(-h // 16)` and the C transcription
+`-(-h / 16)` looks identical and is wrong: `//` floors, `/` truncates toward
+zero, so a 1080-line frame gets 67 block rows instead of 68 and the motion
+search writes one row past the end of the array.
+
+It survived every test because **every clip in `testdata/` divides exactly by
+16** — 352x288 has no remainder, so the two spellings agree. The first 1920x1080
+encode aborted in malloc. Found with ASan in about a minute; the fix is an
+`hve_ceil_div` helper and the regression test uses 70x100, 72x96 and 33x47
+frames, which fail on all three without it.
+
+This is the third time in this project that C's integer semantics have differed
+from Python's in a way that compiles cleanly and produces wrong output rather
+than an error, after `/` versus `//` in the kernel and `>>` on negatives. The
+list in `docs/HANDOFF.md` is not academic.
+
 ## The cost of a third implementation, and why there are two again
 
 Adding the C made three implementations of one loop: `model.py` defining the
