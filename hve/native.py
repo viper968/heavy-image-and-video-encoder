@@ -225,7 +225,7 @@ class Bank:
     this file cannot drift from it by forgetting to resize a table.
     """
 
-    def __init__(self, luma_h, luma_w, video=False):
+    def __init__(self, luma_h, luma_w, video=False, features=None):
         lib = _load()
         bank = model.new_model()
         self._keep = []
@@ -255,6 +255,8 @@ class Bank:
         self.stats = np.zeros(8, dtype=np.int64)
         self._set("stats", self.stats, _I64)
         self.params = model.coder_params()
+        if features is not None:
+            self.params[model.P_FEATURES] = features
         self._set("params", self.params, _I64)
 
         if video:
@@ -323,10 +325,10 @@ class Coder:
 # stills
 
 
-def encode_planes(planes_u8):
+def encode_planes(planes_u8, features=None):
     planes = np.ascontiguousarray(planes_u8, dtype=np.uint8)
     channels, height, width = planes.shape
-    bank = Bank(height, width)
+    bank = Bank(height, width, features=features)
     coder = Coder(True, capacity=planes.size * 2 + 65536)
     for i in range(channels):
         bank.code(coder, True, planes[i], min(i, 3), 1 if i in (1, 2) else 0,
@@ -334,9 +336,9 @@ def encode_planes(planes_u8):
     return coder.finish()
 
 
-def decode_planes(payload, channels, height, width):
+def decode_planes(payload, channels, height, width, features=None):
     planes = np.zeros((channels, height, width), dtype=np.uint8)
-    bank = Bank(height, width)
+    bank = Bank(height, width, features=features)
     coder = Coder(False, payload=payload)
     for i in range(channels):
         bank.code(coder, False, planes[i], min(i, 3), 1 if i in (1, 2) else 0,

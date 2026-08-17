@@ -266,3 +266,77 @@ def test_truncated_file_is_rejected_not_crashed(tmp_path):
             fh.write(full[:cut])
         proc = subprocess.run([BINARY, "info", path], capture_output=True)
         assert proc.returncode in (0, 1)          # never a signal
+
+
+# --------------------------------------------------------------------------
+# presets (the feature bitmask in the header)
+
+
+PRESET_FAST = 127 & ~(4 | 2 | 1)          # -match -lms -blend, as csrc/main.c
+
+
+@pytest.mark.parametrize("preset,features", [("max", 127), ("fast", PRESET_FAST)])
+def test_preset_bytes_match_python(tmp_path, preset, features):
+    arr = np.random.default_rng(21).integers(0, 256, (33, 41, 3), dtype=np.uint8)
+    src = png(str(tmp_path / "in.png"), arr)
+    out = str(tmp_path / "c.hvi")
+    run("encode", src, out, "--preset", preset)
+    with open(out, "rb") as fh:
+        assert fh.read() == image.encode(read_png(src), features=features)
+
+
+@pytest.mark.parametrize("preset", ["max", "fast"])
+def test_preset_is_read_back_from_the_header(tmp_path, preset):
+    """Decoding must need no flag: the file says which model made it."""
+    arr = np.random.default_rng(22).integers(0, 256, (28, 36, 3), dtype=np.uint8)
+    src = png(str(tmp_path / "in.png"), arr)
+    blob, back = str(tmp_path / "a.hvi"), str(tmp_path / "b.png")
+    run("encode", src, blob, "--preset", preset)
+    run("decode", blob, back)                       # no --preset here
+    assert np.array_equal(read_png(back), arr)
+    assert preset in run("info", blob)
+
+
+def test_video_preset_roundtrips(tmp_path):
+    frames = _synth_clip(48, 64)
+    src = _write_y4m(str(tmp_path / "in.y4m"), frames, 64, 48)
+    blob, back = str(tmp_path / "a.hvv"), str(tmp_path / "b.y4m")
+    run("encode", src, blob, "--preset", "fast")
+    run("decode", blob, back)
+    reader = y4m.Y4M(back)
+    got = [[p.copy() for p in f] for f in reader.frames()]
+    reader.close()
+    for want, have in zip(frames, got):
+        for a, b in zip(want, have):
+            assert np.array_equal(a, b)
+
+
+def test_pure_python_refuses_a_preset_it_cannot_reproduce(tmp_path):
+    """model.py implements only the full model. A reduced-preset file is valid
+    but it cannot reproduce it, so it must refuse rather than decode wrongly."""
+    from hve import model, native
+    arr = np.random.default_rng(23).integers(0, 256, (20, 20, 3), dtype=np.uint8)
+    blob = image.encode(arr, features=PRESET_FAST)
+    real = native.available
+    try:
+        native.available = lambda: False
+        with pytest.raises(RuntimeError, match="pure-Python"):
+            image.decode(blob)
+    finally:
+        native.available = real
+    assert np.array_equal(image.decode(blob), arr)
+
+
+def test_old_container_magic_is_rejected(tmp_path):
+    """The header grew a byte, so the magic was bumped: an old file must fail
+    loudly rather than misparse the new field."""
+    arr = np.random.default_rng(24).integers(0, 256, (16, 16, 3), dtype=np.uint8)
+    blob = bytearray(image.encode(arr))
+    blob[:4] = b"HVI2"
+    old = str(tmp_path / "old.hvi")
+    with open(old, "wb") as fh:
+        fh.write(bytes(blob))
+    proc = subprocess.run([BINARY, "info", old], capture_output=True)
+    assert proc.returncode != 0
+    with pytest.raises(ValueError):
+        image.decode(bytes(blob))

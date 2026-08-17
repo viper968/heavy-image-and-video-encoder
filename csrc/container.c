@@ -111,7 +111,7 @@ static int code_still(hve_coder *c, hve_bank *bank, int encode, uint8_t *planes,
 }
 
 int hve_image_encode(const uint8_t *img, int64_t h, int64_t w, int channels,
-                     hve_buf *out)
+                     int64_t features, hve_buf *out)
 {
     uint8_t *planes = NULL;
     int nplanes = 0;
@@ -127,7 +127,7 @@ int hve_image_encode(const uint8_t *img, int64_t h, int64_t w, int channels,
         hve_set_error("out of memory preparing the colour planes");
         return -1;
     }
-    if (hve_bank_init(&bank, h, w) != 0) {
+    if (hve_bank_init(&bank, h, w, features) != 0) {
         free(planes);
         return -1;
     }
@@ -147,6 +147,7 @@ int hve_image_encode(const uint8_t *img, int64_t h, int64_t w, int channels,
         rc |= hve_buf_varint(out, (uint64_t)h);
         rc |= hve_buf_u8(out, (unsigned)channels);
         rc |= hve_buf_u8(out, flags);
+        rc |= hve_buf_u8(out, (unsigned)features);
         rc |= hve_buf_varint(out, payload);
         rc |= hve_buf_put(out, coder.out, payload);
     }
@@ -170,6 +171,7 @@ int hve_image_decode(const uint8_t *blob, size_t n, uint8_t **img,
     int64_t h = (int64_t)hve_rd_varint(&r);
     int channels = (int)hve_rd_u8(&r);
     unsigned flags = hve_rd_u8(&r);
+    int64_t features = (int64_t)hve_rd_u8(&r);
     size_t payload_len = (size_t)hve_rd_varint(&r);
     const uint8_t *payload = hve_rd_raw(&r, payload_len);
     if (r.error || !payload || h <= 0 || w <= 0 || channels < 1
@@ -186,7 +188,7 @@ int hve_image_decode(const uint8_t *blob, size_t n, uint8_t **img,
                       (long long)w, (long long)h);
         return -1;
     }
-    if (hve_bank_init(&bank, h, w) != 0) {
+    if (hve_bank_init(&bank, h, w, features) != 0) {
         free(planes);
         return -1;
     }
@@ -321,8 +323,8 @@ static size_t frame_samples(const hve_frame *f)
     return n;
 }
 
-int hve_video_encode(const hve_frame *frames, int nframes, hve_buf *out,
-                     int verbose)
+int hve_video_encode(const hve_frame *frames, int nframes, int64_t features,
+                     hve_buf *out, int verbose)
 {
     if (nframes < 1) {
         hve_set_error("no frames");
@@ -338,7 +340,7 @@ int hve_video_encode(const hve_frame *frames, int nframes, hve_buf *out,
     hve_bank bank;
     hve_coder coder;
     memset(&coder, 0, sizeof(coder));
-    if (hve_bank_init(&bank, luma_h, luma_w) != 0)
+    if (hve_bank_init(&bank, luma_h, luma_w, features) != 0)
         return -1;
     if (hve_bank_video(&bank) != 0) {
         hve_bank_free(&bank);
@@ -416,6 +418,7 @@ int hve_video_encode(const hve_frame *frames, int nframes, hve_buf *out,
         e |= hve_buf_u8(out, (unsigned)nplanes);
         e |= hve_buf_u8(out, 0);                    /* flags: planar input */
         e |= hve_buf_u8(out, HVE_BLOCK);
+        e |= hve_buf_u8(out, (unsigned)features);
         for (int i = 0; i < nplanes; i++) {
             e |= hve_buf_varint(out, (uint64_t)frames[0].p[i].w);
             e |= hve_buf_varint(out, (uint64_t)frames[0].p[i].h);
@@ -449,6 +452,7 @@ int hve_video_decode(const uint8_t *blob, size_t n, hve_frame **frames_out,
     int nplanes = (int)hve_rd_u8(&r);
     (void)hve_rd_u8(&r);                            /* flags */
     int block = (int)hve_rd_u8(&r);
+    int64_t features = (int64_t)hve_rd_u8(&r);
     int64_t hs[HVE_MAX_PLANES], ws[HVE_MAX_PLANES];
     if (r.error || nframes < 1 || nplanes < 1 || nplanes > HVE_MAX_PLANES) {
         hve_set_error("corrupt .hvv header");
@@ -479,7 +483,7 @@ int hve_video_decode(const uint8_t *blob, size_t n, hve_frame **frames_out,
     int rc = -1;
     int made = 0;
 
-    if (hve_bank_init(&bank, luma_h, luma_w) != 0)
+    if (hve_bank_init(&bank, luma_h, luma_w, features) != 0)
         goto done_nobank;
     if (hve_bank_video(&bank) != 0)
         goto done;

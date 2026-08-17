@@ -772,6 +772,8 @@ FEAT_APM2 = 32      # second secondary-estimation stage, keyed on match state
 FEAT_NBMIX = 64     # mixer + APM on the magnitude bins
 FEAT_ALL = 127
 FEATURES = FEAT_ALL
+# Position of FEATURES in coder_params(); the C side has the same enum.
+P_FEATURES = 28
 
 
 def coder_params():

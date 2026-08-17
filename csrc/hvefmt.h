@@ -92,13 +92,13 @@ int hve_frame_alloc(hve_frame *f, int nplanes, const int64_t *hs,
 
 /* Stills. `img` is (h, w, channels) interleaved, channels in 1..4. */
 int hve_image_encode(const uint8_t *img, int64_t h, int64_t w, int channels,
-                     hve_buf *out);
+                     int64_t features, hve_buf *out);
 int hve_image_decode(const uint8_t *blob, size_t n, uint8_t **img,
                      int64_t *h, int64_t *w, int *channels);
 
 /* Video. Frames are planar (Y, U, V) at their native subsampled sizes. */
-int hve_video_encode(const hve_frame *frames, int nframes, hve_buf *out,
-                     int verbose);
+int hve_video_encode(const hve_frame *frames, int nframes, int64_t features,
+                     hve_buf *out, int verbose);
 int hve_video_decode(const uint8_t *blob, size_t n, hve_frame **frames,
                      int *nframes, int verbose);
 

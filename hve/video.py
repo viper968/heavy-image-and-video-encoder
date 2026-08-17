@@ -13,7 +13,7 @@ from . import model, native, rc
 from .bitio import Reader, Writer
 from .transform import predict_plane, rct_forward, rct_inverse
 
-MAGIC = b"HVV1"
+MAGIC = b"HVV2"
 FLAG_RCT = 1
 BLOCK = 16
 SEARCH = 8              # full-pel search radius, in whole pixels
@@ -447,7 +447,7 @@ def _native_inter(modes_i, mvs_i, block, sy, sx, prev_plane):
             native.halfpel_planes(prev_plane))
 
 
-def _encode_payload_native(frames, block, luma_h, luma_w, progress):
+def _encode_payload_native(frames, block, luma_h, luma_w, progress, features):
     """The frame loop, with the per-pixel coding done by the C kernel.
 
     Planes stay uint8 the whole way, which matters at 1080p: the four half-pel
@@ -456,7 +456,7 @@ def _encode_payload_native(frames, block, luma_h, luma_w, progress):
     """
     samples = sum(p.size for p in _to_planes(frames[0])[0]) * len(frames)
     coder = native.Coder(True, capacity=samples * 2 + 65536)
-    bank = native.Bank(luma_h, luma_w, video=True)
+    bank = native.Bank(luma_h, luma_w, video=True, features=features)
     prev = None
 
     for fi, frame in enumerate(frames):
@@ -485,10 +485,10 @@ def _encode_payload_native(frames, block, luma_h, luma_w, progress):
     return coder.finish()
 
 
-def _decode_payload_native(payload, shapes, nframes, block, progress):
+def _decode_payload_native(payload, shapes, nframes, block, progress, features):
     coder = native.Coder(False, payload=payload)
     luma_h, luma_w = shapes[0]
-    bank = native.Bank(luma_h, luma_w, video=True)
+    bank = native.Bank(luma_h, luma_w, video=True, features=features)
     nby, nbx = -(-luma_h // block), -(-luma_w // block)
     prev = None
     out = []
@@ -531,8 +531,13 @@ def _to_planes(frame):
     return [np.asarray(p, dtype=np.uint8) for p in frame], 0
 
 
-def encode(frames, progress=None):
-    """Compress a sequence of frames to .hvv bytes."""
+def encode(frames, progress=None, features=None):
+    """Compress a sequence of frames to .hvv bytes.
+
+    `features` selects which model stages run and is written into the header,
+    so decoding needs no matching argument. See model.FEAT_*.
+    """
+    features = model.FEATURES if features is None else features
     frames = list(frames)
     if not frames:
         raise ValueError("no frames")
@@ -545,6 +550,7 @@ def encode(frames, progress=None):
     w.u8(nplanes)
     w.u8(flags)
     w.u8(BLOCK)          # in the header, so the decoder never depends on a constant
+    w.u8(features)
     for p in first:
         w.varint(p.shape[1])
         w.varint(p.shape[0])
@@ -552,8 +558,11 @@ def encode(frames, progress=None):
     block = BLOCK
     luma_h, luma_w = first[0].shape
 
+    from .image import _check_features
+    _check_features(features)
     if native.available():
-        payload = _encode_payload_native(frames, block, luma_h, luma_w, progress)
+        payload = _encode_payload_native(frames, block, luma_h, luma_w, progress,
+                                         features)
         w.varint(len(payload))
         w.raw(payload)
         return w.bytes()
@@ -613,6 +622,7 @@ def decode(data, progress=None):
     nplanes = r.u8()
     flags = r.u8()
     block = r.u8()
+    features = r.u8()
     shapes = []
     for _ in range(nplanes):
         pw = r.varint()
@@ -621,10 +631,12 @@ def decode(data, progress=None):
     payload_len = r.varint()
     payload = r.raw(payload_len)
 
+    from .image import _check_features
+    _check_features(features)
     if native.available():
         out = []
         for planes in _decode_payload_native(payload, shapes, nframes, block,
-                                             progress):
+                                             progress, features):
             out.append(rct_inverse(planes) if flags & FLAG_RCT else planes)
         return out
 

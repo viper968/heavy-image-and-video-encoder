@@ -21,7 +21,7 @@ void hve_set_features(int64_t features)
     g_features = features;
 }
 
-int64_t hve_get_features(void)
+int64_t hve_default_features(void)
 {
     return g_features >= 0 ? g_features : HVE_PARAMS[P_FEATURES];
 }
@@ -92,7 +92,8 @@ void hve_bank_free(hve_bank *m)
     memset(m, 0, sizeof(*m));
 }
 
-int hve_bank_init(hve_bank *m, int64_t luma_h, int64_t luma_w)
+int hve_bank_init(hve_bank *m, int64_t luma_h, int64_t luma_w,
+                  int64_t features)
 {
     memset(m, 0, sizeof(*m));
     int n = 0;
@@ -137,8 +138,7 @@ int hve_bank_init(hve_bank *m, int64_t luma_h, int64_t luma_w)
 
     for (int i = 0; i < P_COUNT; i++)
         m->params[i] = HVE_PARAMS[i];
-    if (g_features >= 0)
-        m->params[P_FEATURES] = g_features;
+    m->params[P_FEATURES] = features;
     m->m.params = m->params;
     m->match_table = (int32_t *)calloc((size_t)HVE_MATCH_HASH_MASK + 1,
                                        sizeof(int32_t));

@@ -56,8 +56,10 @@ static void usage(FILE *fh)
         "options:\n"
         "  --frames N   stop after N video frames\n"
         "  --threads N  motion-search threads (default: one per core)\n"
-        "  --features N model stages bitmask (research knob; encode and\n"
-        "               decode must match)\n"
+        "  --preset P   max (default, best ratio) or fast (1.8-2.5x quicker\n"
+        "               on 1080p video for 1-4%% more bytes). Recorded in the\n"
+        "               file, so decoding needs no flag.\n"
+        "  --features N explicit model-stage bitmask, for experiments\n"
         "  -v           per-frame progress on stderr\n");
 }
 
@@ -71,7 +73,25 @@ static int fail(void)
  * commands
  */
 
-static int cmd_encode(const char *in, const char *out, int frames, int verbose)
+/* Presets. "max" is the full model and the best ratio on photographs; "fast"
+ * drops the three stages that a 1080p video ablation showed are not merely
+ * expensive there but actively harmful. Which one wins is content-dependent,
+ * which is exactly why the choice travels in the header. */
+#define PRESET_MAX  HVE_FEAT_ALL
+#define PRESET_FAST (HVE_FEAT_ALL & ~(HVE_FEAT_MATCH | HVE_FEAT_LMS \
+                                      | HVE_FEAT_BLEND))
+
+static const char *preset_name(int64_t f)
+{
+    if (f == PRESET_MAX)
+        return "max";
+    if (f == PRESET_FAST)
+        return "fast";
+    return "custom";
+}
+
+static int cmd_encode(const char *in, const char *out, int frames, int verbose,
+                      int64_t features)
 {
     hve_buf blob = {0};
     double t0 = now();
@@ -87,7 +107,7 @@ static int cmd_encode(const char *in, const char *out, int frames, int verbose)
         for (int i = 0; i < n; i++)
             for (int p = 0; p < fs[i].nplanes; p++)
                 original += (size_t)fs[i].p[p].h * fs[i].p[p].w;
-        int rc = hve_video_encode(fs, n, &blob, verbose);
+        int rc = hve_video_encode(fs, n, features, &blob, verbose);
         for (int i = 0; i < n; i++)
             hve_frame_free(&fs[i]);
         free(fs);
@@ -102,7 +122,7 @@ static int cmd_encode(const char *in, const char *out, int frames, int verbose)
         if (hve_png_read(in, &img, &h, &w, &channels) != 0)
             return fail();
         original = (size_t)h * w * channels;
-        int rc = hve_image_encode(img, h, w, channels, &blob);
+        int rc = hve_image_encode(img, h, w, channels, features, &blob);
         free(img);
         if (rc != 0) {
             hve_buf_free(&blob);
@@ -114,8 +134,9 @@ static int cmd_encode(const char *in, const char *out, int frames, int verbose)
         hve_buf_free(&blob);
         return fail();
     }
-    printf("%s -> %s  %zu -> %zu bytes (%.2fx, %.1fs)\n", in, out, original,
-           blob.len, (double)original / (double)blob.len, now() - t0);
+    printf("%s -> %s  %zu -> %zu bytes (%.2fx, %.1fs, preset %s)\n", in, out,
+           original, blob.len, (double)original / (double)blob.len, now() - t0,
+           preset_name(features));
     hve_buf_free(&blob);
     return 0;
 }
@@ -181,18 +202,21 @@ static int cmd_info(const char *in)
         int64_t w = (int64_t)hve_rd_varint(&r);
         int64_t h = (int64_t)hve_rd_varint(&r);
         unsigned channels = hve_rd_u8(&r), flags = hve_rd_u8(&r);
+        int64_t feat = (int64_t)hve_rd_u8(&r);
         if (r.error || !h || !w) {
             free(blob);
             hve_set_error("corrupt .hvi header");
             return fail();
         }
-        printf("hve image  %lldx%lld  %u channels  rct=%u  %zu bytes  %.3f bpp\n",
-               (long long)w, (long long)h, channels, flags & HVE_FLAG_RCT, n,
+        printf("hve image  %lldx%lld  %u channels  rct=%u  preset %s  %zu bytes"
+               "  %.3f bpp\n", (long long)w, (long long)h, channels,
+               flags & HVE_FLAG_RCT, preset_name(feat), n,
                (double)n * 8.0 / (double)(w * h));
     } else if (!memcmp(magic, HVV_MAGIC, 4)) {
         uint64_t nframes = hve_rd_varint(&r);
         unsigned nplanes = hve_rd_u8(&r), flags = hve_rd_u8(&r);
         unsigned block = hve_rd_u8(&r);
+        int64_t feat = (int64_t)hve_rd_u8(&r);
         printf("hve video  %llu frames  %u planes (", (unsigned long long)nframes,
                nplanes);
         for (unsigned i = 0; i < nplanes && !r.error; i++) {
@@ -200,7 +224,8 @@ static int cmd_info(const char *in)
             printf("%s%llux%llu", i ? ", " : "", (unsigned long long)w,
                    (unsigned long long)h);
         }
-        printf(")  block=%u  rct=%u  %zu bytes\n", block, flags & HVE_FLAG_RCT, n);
+        printf(")  block=%u  rct=%u  preset %s  %zu bytes\n", block,
+               flags & HVE_FLAG_RCT, preset_name(feat), n);
         if (r.error) {
             free(blob);
             hve_set_error("corrupt .hvv header");
@@ -223,6 +248,13 @@ int main(int argc, char **argv)
 {
     const char *positional[2] = {NULL, NULL};
     int npos = 0, frames = 0, verbose = 0;
+    /* Default to the full model: it is what every previous release produced,
+     * and it wins on stills and on busy video alike. `fast` is the deliberate
+     * trade. There is no `auto`: the decision is worth 1-4% on real content and
+     * a probe encode costs far more than that is worth, and a centre-crop probe
+     * was measured picking the wrong preset on the very clip that motivated the
+     * feature. x264 makes the caller choose a preset; so does this. */
+    int64_t features = PRESET_MAX;
 
     if (argc < 2) {
         usage(stderr);
@@ -246,10 +278,20 @@ int main(int argc, char **argv)
             frames = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
             hve_set_threads(atoi(argv[++i]));
+        } else if (!strcmp(argv[i], "--preset") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "max"))
+                features = PRESET_MAX;
+            else if (!strcmp(v, "fast"))
+                features = PRESET_FAST;
+            else {
+                fprintf(stderr, "error: unknown preset %s (max, fast)\n", v);
+                return 2;
+            }
         } else if (!strcmp(argv[i], "--features") && i + 1 < argc) {
-            /* Research knob: which model stages run. Encoder and decoder must
-             * be given the same value, since it is not in the header yet. */
-            hve_set_features(strtoll(argv[++i], NULL, 0));
+            /* Research knob: an explicit stage bitmask. The decoder reads it
+             * back out of the header, so only encoding needs it. */
+            features = strtoll(argv[++i], NULL, 0);
         } else if (argv[i][0] == '-' && argv[i][1]) {
             fprintf(stderr, "error: unknown option %s\n", argv[i]);
             return 2;
@@ -266,7 +308,8 @@ int main(int argc, char **argv)
             usage(stderr);
             return 2;
         }
-        return cmd_encode(positional[0], positional[1], frames, verbose);
+        return cmd_encode(positional[0], positional[1], frames, verbose,
+                          features);
     }
     if (!strcmp(cmd, "decode")) {
         if (npos != 2) {

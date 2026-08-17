@@ -7,7 +7,7 @@ import time
 
 import numpy as np
 
-from . import image, video, y4m
+from . import image, model, video, y4m
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".ppm", ".webp", ".gif"}
 
@@ -28,15 +28,17 @@ def _save_image(arr, path):
 def cmd_encode(args):
     src_ext = os.path.splitext(args.input)[1].lower()
     start = time.time()
+    features = model.FEAT_ALL if args.preset == "max" else PRESET_FAST
     if src_ext == ".y4m":
         reader = y4m.Y4M(args.input)
         frames = [[p.copy() for p in f] for f in reader.frames(limit=args.frames)]
         reader.close()
-        blob = video.encode(frames, progress=_progress(len(frames)) if args.verbose else None)
+        blob = video.encode(frames, features=features,
+                            progress=_progress(len(frames)) if args.verbose else None)
         original = sum(p.size for f in frames for p in f)
     elif src_ext in IMAGE_EXT:
         arr = _load_image(args.input)
-        blob = image.encode(arr)
+        blob = image.encode(arr, features=features)
         original = arr.size
     else:
         raise SystemExit("unsupported input type: %s" % src_ext)
@@ -77,18 +79,34 @@ def cmd_info(args):
     magic = r.raw(4)
     if magic == image.MAGIC:
         width, height = r.varint(), r.varint()
-        channels, flags = r.u8(), r.u8()
-        print("hve image  %dx%d  %d channels  rct=%d  %d bytes  %.3f bpp"
-              % (width, height, channels, flags & image.FLAG_RCT, len(blob),
+        channels, flags, features = r.u8(), r.u8(), r.u8()
+        print("hve image  %dx%d  %d channels  rct=%d  preset %s  %d bytes  %.3f bpp"
+              % (width, height, channels, flags & image.FLAG_RCT,
+                 _preset_name(features), len(blob),
                  len(blob) * 8.0 / (width * height)))
     elif magic == video.MAGIC:
         nframes, nplanes, flags, block = r.varint(), r.u8(), r.u8(), r.u8()
+        features = r.u8()
         shapes = ["%dx%d" % (r.varint(), r.varint()) for _ in range(nplanes)]
-        print("hve video  %d frames  %d planes (%s)  block=%d  rct=%d  %d bytes"
+        print("hve video  %d frames  %d planes (%s)  block=%d  rct=%d  "
+              "preset %s  %d bytes"
               % (nframes, nplanes, ", ".join(shapes), block,
-                 flags & video.FLAG_RCT, len(blob)))
+                 flags & video.FLAG_RCT, _preset_name(features), len(blob)))
     else:
         raise SystemExit("unrecognised container")
+
+
+# Keep these names in step with csrc/main.c's preset_name().
+PRESET_FAST = model.FEAT_ALL & ~(model.FEAT_MATCH | model.FEAT_LMS
+                                 | model.FEAT_BLEND)
+
+
+def _preset_name(features):
+    if features == model.FEAT_ALL:
+        return "max"
+    if features == PRESET_FAST:
+        return "fast"
+    return "custom(0x%02x)" % features
 
 
 def _progress(total):
@@ -109,6 +127,8 @@ def main(argv=None):
     enc.add_argument("output")
     enc.add_argument("--frames", type=int, default=None, help="limit video frames")
     enc.add_argument("-v", "--verbose", action="store_true")
+    enc.add_argument("--preset", choices=("max", "fast"), default="max",
+                     help="model stages to run; recorded in the file")
     enc.set_defaults(func=cmd_encode)
 
     dec = sub.add_parser("decode", help="restore the original bytes")

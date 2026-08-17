@@ -22,13 +22,15 @@ typedef struct {
     int64_t *mode_p, *mv_zero, *mv_sign, *mv_mag;
 } hve_bank;
 
-int hve_bank_init(hve_bank *m, int64_t luma_h, int64_t luma_w);
+int hve_bank_init(hve_bank *m, int64_t luma_h, int64_t luma_w,
+                  int64_t features);
 
-/* Which model stages are switched on, as a bitmask of HVE_FEAT_*. Passing a
- * negative value restores the built-in default. The encoder and decoder must
- * agree, so this travels in the container header. */
+/* Which model stages are switched on, as a bitmask of HVE_FEAT_*. This travels
+ * in the container header, so the decoder always uses what the encoder used.
+ * hve_default_features() is what the CLI starts from; a negative value passed
+ * to hve_set_features restores the built-in default. */
 void hve_set_features(int64_t features);
-int64_t hve_get_features(void);
+int64_t hve_default_features(void);
 int hve_bank_video(hve_bank *m);
 void hve_bank_free(hve_bank *m);
 
