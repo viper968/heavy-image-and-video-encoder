@@ -326,6 +326,11 @@ The older options, still open, roughly in order of expected value:
   1.25% on the CIF pair. Two hypotheses were tested and both were wrong (see
   `docs/research.md`). Re-measure both sides first — the "model off" figure
   predates the `_full_search` fix — then diagnose before changing anything.
+- **Rate-aware motion search** — now the best-evidenced item on this list.
+  Widening the search radius from 8 to 64 makes 1080p files *monotonically
+  bigger* (3,646,266 -> 3,702,994), because the search scores residuals and
+  cannot see that magnitudes are coded unary. Any future work on motion has to
+  fix this first, or it will measure backwards. Original note follows.
 - **Rate-aware motion search.** The search scores residuals only; the cost of
   *sending* a vector enters once as a flat `mv_penalty=48` in `choose_modes` and
   never in the choice between two candidates. Magnitudes are coded unary against
@@ -378,6 +383,32 @@ The older options, still open, roughly in order of expected value:
   the file is learned model state. See "What is left in the serial loop" in
   `docs/research.md` before proposing it — the old "0.3-1%" figure in this file
   was never measured and was wrong.
+
+## Is this a real format? Read this before pitching it
+
+Measured, not guessed; the tables are in "Could this ship as a real format" in
+`docs/research.md`. Short version:
+
+- **Against FFV1**, the lossless video standard: **57.7% smaller on a static
+  camera**, 14.4% smaller on a panning CIF clip, and **0.3% smaller and 3.1x
+  slower** on moving 1080p. The whole advantage is temporal redundancy.
+- **Motion compensation contributes 0.70% at 1080p** and 59% on akiyo. Only
+  0.9% of 1080p blocks pick inter. This was checked three ways and is not a
+  tuning bug — at high resolution the spatial model already predicts nearly
+  everything.
+- **Against the web**, which is lossy: AV1 at crf32 is **107x smaller and 22x
+  faster to decode** on the same clip. That gap is not closable.
+- **On stills** we beat PNG by 32% and WebP lossless by 4.9%, and lose to
+  JPEG XL by 6.86% while decoding at half its speed. JPEG XL is smaller *and*
+  faster, is ISO/IEC 18181, and Chrome removed it anyway.
+- Decoder peak RSS is **63.6 MB** at 1080p (4.5 MB of that is model state).
+- 8-bit only; no 10/12-bit, no HDR, no wide gamut, no progressive decode.
+- There is **no bitstream spec** — the C is the spec.
+- Fuzzing found a reachable heap over-read on the first attempt (fixed,
+  `057b48c`). Before this there had been none, ever.
+
+The defensible niche is lossless capture and archival of static-camera content,
+where halving FFV1 is a genuine result. Web delivery is not it.
 
 ## Honest framing
 

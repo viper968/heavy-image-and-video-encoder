@@ -1021,6 +1021,107 @@ cannot know a value before decoding it, so it still derives one pixel at a
 time. Encode and decode used to cost about the same; encode is now the faster
 of the two.
 
+## Could this ship as a real format? What the competition actually costs
+
+Asked directly, and measured rather than guessed. Everything below is single
+threaded, because that is the honest way to compare a decoder: threading is
+available to every codec here.
+
+### Against the codec this should be compared to
+
+FFV1 is the lossless video standard - FFmpeg, archives, broadcasters - and it
+is intra-only, so it also gets random access on every frame for free.
+
+| clip | FFV1 | hve | size | decode |
+|---|---:|---:|---:|---:|
+| akiyo CIF x16 (static camera) | 746,181 @ 171 fps | **315,981** @ 134 fps | **-57.7%** | 0.8x |
+| bus CIF x30 (panning) | 2,294,461 @ 158 fps | **1,964,455** @ 77 fps | **-14.4%** | 0.5x |
+| Sintel 1080p x16 (motion) | 3,647,022 @ 29 fps | 3,635,971 @ 9.2 fps | -0.3% | **0.32x** |
+
+The advantage is real and it is entirely about temporal redundancy. On a static
+camera we halve FFV1, because FFV1 has no motion compensation and we do. On
+moving 1080p the advantage collapses to nothing and we are three times slower.
+
+### Motion compensation does nothing at 1080p
+
+Coding every frame independently instead of inter-coding costs:
+
+| clip | inter-coded | all-intra | motion compensation saves |
+|---|---:|---:|---:|
+| akiyo CIF | 322,319 | 787,163 | **59.05%** |
+| Sintel 1080p | 3,635,971 | 3,661,773 | **0.70%** |
+
+Only **0.9% of blocks choose inter mode** at 1080p, against 64% on bus and 99%
+on akiyo. Three things were checked before blaming the search:
+
+- **Widening the search makes files bigger, monotonically** - 3,646,266 bytes
+  at radius 8 rising to 3,702,994 at radius 64. The search scores residuals and
+  cannot see what a vector costs to send, and magnitudes are coded unary, so a
+  wider box buys slightly better matches at many more bits. This is the
+  "rate-aware motion search" item in `docs/HANDOFF.md`, and it is now evidence
+  rather than theory.
+- **The vectors are not clipping.** On bus, lifting the radius from 8 to 64
+  leaves the 90th percentile magnitude at 16 half-pels and the inter fraction
+  at 64%. The range was about right.
+- **The mode decision is not miscalibrated.** Sweeping `MV_PENALTY` from 0 to
+  768 moves 1080p by 0.09% and its optimum is *higher* than the current 48,
+  i.e. the tuning wants *fewer* inter blocks, not more.
+
+So this is not a bug to fix. At high resolution neighbouring pixels are so
+correlated that the spatial model already predicts nearly everything, while the
+temporal residual still carries motion-estimation error and grain. That is also
+why intra-only FFV1 is competitive at 1080p and hopeless on akiyo.
+
+### Against what the web actually ships
+
+Same clip, same machine, one thread:
+
+| codec | bytes | decode | vs hve |
+|---|---:|---:|---|
+| hve, `fast` | 3,635,971 | 9.2 fps | — |
+| x264 lossless veryslow | 4,180,322 | 33 fps | 15% bigger, 3.6x faster |
+| x264 **lossy** crf23 | 142,334 | 195 fps | **26x smaller, 21x faster** |
+| AV1 **lossy** crf32 | 34,148 | 201 fps | **107x smaller, 22x faster** |
+
+Web video is lossy. The gap is two orders of magnitude and no amount of tuning
+a lossless codec closes it.
+
+### Stills, where the position is much better
+
+kodim13, in-process decode:
+
+| codec | bytes | decode |
+|---|---:|---:|
+| WebP lossless | 606,452 | 63.4 Mpixel/s |
+| PNG | 822,712 | 52.0 Mpixel/s |
+| JPEG XL e7 lossless | 551,364 | 4.2 Mpixel/s |
+| **hve** | **564,004** | **2.1 Mpixel/s** |
+
+Across the held-out 18 we are 32% smaller than PNG and 4.9% smaller than WebP
+lossless, and 6.86% larger than JPEG XL e9. Note JPEG XL lossless decodes at
+only twice our speed, so we are in its class rather than PNG's - and that is
+the problem, because JPEG XL is smaller *and* faster, is ISO/IEC 18181, has a
+mature reference implementation, and Chrome removed it anyway. Being dominated
+on both axes by a standardised codec that itself failed to get adopted is the
+most informative number in this document.
+
+### What would have to be true
+
+Decoder peak RSS is 63.6 MB for 1080p, against a few MB for FFV1 - the model
+state is 4.5 MB and the rest is frame buffers. That alone is awkward for a
+phone rendering several images per page.
+
+Fixable with known work: random access (measured at **+0.70%** to reset the
+model every frame, +0.06% every eight), a bitstream spec, continuous fuzzing,
+10/12-bit and wide gamut, progressive decode.
+
+Not fixable by optimisation: matching FFV1's decode speed needs 3x and the
+serial pass is 79% of the loop; matching lossy web video needs 100x on size.
+There is no hardware decode and never will be.
+
+The honest niche is not web delivery. It is lossless capture and archival of
+content with a static camera, where halving FFV1 is a real result.
+
 ## The cost of a third implementation, and why there are two again
 
 Adding the C made three implementations of one loop: `model.py` defining the
