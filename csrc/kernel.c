@@ -98,6 +98,16 @@ static inline void enc_bypass(hve_rc *r, uint8_t *out, int64_t value,
     }
 }
 
+/* One payload byte, or zero once the payload is exhausted. Past the end the
+ * decoder is producing nonsense either way; the point is that it does so
+ * inside its own buffer, and that s[2] keeps counting so the overrun can be
+ * reported afterwards. The branch predicts perfectly on valid streams. */
+static inline int64_t rc_byte(hve_rc *r, const uint8_t *data)
+{
+    int64_t i = r->s[2]++;
+    return i < r->s[3] ? (int64_t)data[i] : 0;
+}
+
 static inline int64_t dec_bit_p(hve_rc *r, const uint8_t *data, int64_t p)
 {
     int64_t bound = (r->s[1] >> 15) * p, v;
@@ -111,8 +121,7 @@ static inline int64_t dec_bit_p(hve_rc *r, const uint8_t *data, int64_t p)
     }
     while (r->s[1] < 16777216) {
         r->s[1] <<= 8;
-        r->s[0] = ((r->s[0] << 8) | data[r->s[2]]) & 0xFFFFFFFF;
-        r->s[2]++;
+        r->s[0] = ((r->s[0] << 8) | rc_byte(r, data)) & 0xFFFFFFFF;
     }
     return v;
 }
@@ -134,8 +143,7 @@ static inline int64_t dec_bit(hve_rc *r, const uint8_t *data, int64_t *probs,
     }
     while (r->s[1] < 16777216) {
         r->s[1] <<= 8;
-        r->s[0] = ((r->s[0] << 8) | data[r->s[2]]) & 0xFFFFFFFF;
-        r->s[2]++;
+        r->s[0] = ((r->s[0] << 8) | rc_byte(r, data)) & 0xFFFFFFFF;
     }
     return v;
 }
@@ -153,8 +161,7 @@ static inline int64_t dec_bypass(hve_rc *r, const uint8_t *data, int64_t nbits)
         }
         while (r->s[1] < 16777216) {
             r->s[1] <<= 8;
-            r->s[0] = ((r->s[0] << 8) | data[r->s[2]]) & 0xFFFFFFFF;
-            r->s[2]++;
+            r->s[0] = ((r->s[0] << 8) | rc_byte(r, data)) & 0xFFFFFFFF;
         }
     }
     return value;

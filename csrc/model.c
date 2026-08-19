@@ -209,6 +209,7 @@ void hve_coder_decode_init(hve_coder *c, const uint8_t *payload, size_t n)
         code = (code << 8) | payload[i];
     c->rc.s[0] = code;
     c->rc.s[2] = 5;
+    c->rc.s[3] = (int64_t)n;
 }
 
 size_t hve_coder_finish(hve_coder *c)

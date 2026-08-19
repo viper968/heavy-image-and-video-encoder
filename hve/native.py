@@ -322,6 +322,8 @@ class Coder:
             self.out = np.zeros(1, dtype=np.uint8)
             self.rc.s[0] = int.from_bytes(bytes(self.data[1:5]), "big")
             self.rc.s[2] = 5
+            # s[3] bounds the payload reads; see the note in csrc/hve.h.
+            self.rc.s[3] = len(self.data)
 
     def finish(self):
         n = self._lib.hve_finish_encode(ctypes.byref(self.rc), _p(self.out, _U8))

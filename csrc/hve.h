@@ -90,7 +90,14 @@ enum {
 
 /* Range-coder state. Encoding uses low/range/cache/cache_size/pos; decoding
  * reuses the same five slots as code/range/pos, so one five-element array
- * serves both directions exactly as hve/rc.py's two classes do. */
+ * serves both directions exactly as hve/rc.py's two classes do.
+ *
+ * Decoding also puts the payload length in s[3], which encoding uses for
+ * cache_size and decoding otherwise leaves idle. A corrupt stream decodes to
+ * different symbols, takes different branches and can therefore ask for more
+ * bytes than exist; without the length the reader walked off the end of the
+ * buffer, which a few single-byte mutations were enough to trigger. Any caller
+ * that sets up a decoder must set it. */
 typedef struct {
     int64_t s[5];
 } hve_rc;

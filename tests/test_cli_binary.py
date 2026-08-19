@@ -480,3 +480,33 @@ def test_batched_encode_decodes_with_the_scalar_decoder(tmp_path, h, w):
     for want, have in zip(frames, got):
         for a, b in zip(want, have):
             assert np.array_equal(a, b)
+
+
+def test_decoder_survives_corrupted_payloads(tmp_path):
+    """A corrupt stream must stay inside its own buffer.
+
+    A damaged payload decodes to different symbols, takes different branches
+    and asks the range coder for more bytes than exist. That used to walk off
+    the end of the payload - roughly one in four single-byte mutations of a
+    video file did it. Garbage output is fine here; reading out of bounds is
+    not, and only a sanitiser build can see the difference, so this checks the
+    weaker property that every build can: no crash, and a clean exit status.
+    """
+    import random
+    frames = _synth_clip(32, 48)
+    src = _write_y4m(str(tmp_path / "in.y4m"), frames, 48, 32)
+    good = str(tmp_path / "good.hvv")
+    run("encode", src, good, "--slices", "1", "--preset", "fast")
+    with open(good, "rb") as fh:
+        data = fh.read()
+    rnd = random.Random(20260819)
+    bad, out = str(tmp_path / "bad.hvv"), str(tmp_path / "out.y4m")
+    for _ in range(40):
+        m = bytearray(data)
+        for _ in range(rnd.randint(1, 6)):
+            m[rnd.randrange(len(m))] = rnd.randrange(256)
+        with open(bad, "wb") as fh:
+            fh.write(bytes(m))
+        proc = subprocess.run([BINARY, "decode", bad, out],
+                              capture_output=True)
+        assert proc.returncode >= 0, "decoder died on a signal"
