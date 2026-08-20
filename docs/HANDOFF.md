@@ -384,6 +384,34 @@ The older options, still open, roughly in order of expected value:
   `docs/research.md` before proposing it — the old "0.3-1%" figure in this file
   was never measured and was wrong.
 
+## The serial pass: what is left after this round
+
+Profiled properly for the first time, and **on the decoder** - profiling the
+encoder hides the work the decoder cannot avoid, which is how the confidence
+hoist stayed invisible. Full tables in "Attacking the serial pass" in
+`docs/research.md`.
+
+It is **compute-bound**: IPC 3.81, LLC misses 0.012 per sample. Prefetching and
+cache-motivated narrowing are both ruled out; the only lever is fewer
+instructions. This round took 679 per sample down to about 480, and 1080p
+single-threaded decode from 7.8 to 11.3 fps.
+
+What remains, as a share of decoder instructions:
+
+- **scalar context derivation, ~40%** — the decoder cannot use `derive_row`
+  because it needs the just-decoded west pixel. Only part of it truly depends
+  on west (task: precompute the previous-row half). The profile says that part
+  is worth **~5%**, not the 15-20% a first reading of the bucket suggests, so
+  price it before building it.
+- **3 experts + mixer, 19%** — all three earn their place, measured.
+- **range coder, 14%** — byte-at-a-time renormalisation. A wider renormalisation
+  is a core-format change for maybe 5%; not attempted.
+- everything else is under 8% each.
+
+Do not re-propose: prefetching, multi-symbol coding, dropping the exponent
+chain's mixer, or removing the ladder bounds checks. All four are measured and
+written up with the numbers.
+
 ## Is this a real format? Read this before pitching it
 
 Measured, not guessed; the tables are in "Could this ship as a real format" in

@@ -1021,6 +1021,90 @@ cannot know a value before decoding it, so it still derives one pixel at a
 time. Encode and decode used to cost about the same; encode is now the faster
 of the two.
 
+## Attacking the serial pass
+
+The serial pass had never been profiled on its own. Doing that first mattered,
+because the previous two rounds of speed work were steered by estimates that
+came out three times too high.
+
+**It is compute-bound, not memory-bound.** IPC 3.81 on a machine that retires
+about six per cycle, LLC misses 0.012 per sample, 5.8M cache misses against
+16.2M references. Nothing is stalling. That rules out prefetching - which the
+batched derivation would have made easy, since the contexts are known a row
+ahead - and it rules out cache-motivated narrowing. The only lever is executing
+fewer instructions, and there were **679 per sample**.
+
+### The feature gates price things exactly; the profiler does not
+
+Sampled profiles put APM1+APM2 at 34.9% of kernel instructions. The gates put
+them at 10%. The gates are right - sampling skid piles counts onto the far side
+of a dependency chain, and the APM stages are one long chain of dependent
+loads. Where an exact ablation is available, use it.
+
+### Two stages that were not earning their instructions
+
+| stage | instruction cost | what it buys |
+|---|---:|---|
+| APM1 + APM2 | 10% (16% of wall) | +0.033% dev CIF, +0.210% dev stills, +0.53% 1080p |
+| APM2 alone | 6.5% | +0.003% dev CIF, **-0.04% on 1080p** |
+| match + conf experts | 11% | ±0.001% dev CIF, **-0.067% on 1080p** |
+
+The second row is the interesting one. Building `derive_row` had already shown
+that with the match model and LMS off, `match_ctx` and `conf_ctx` cannot vary -
+`conf_ctx` was a linear ladder scan returning the same bin every pixel. So two
+of the five mixer inputs were not models at all, just a lone adaptive scalar
+each, and a mixer has no use for two bias terms. Gating them on `f_match` and
+`f_lms` is 11% of instructions for nothing.
+
+The other three experts were checked before stopping there: dropping `dir_p`
+costs up to +1.008% and `diff_p` up to +0.691%. Five to three, and no further.
+
+Both changes went into the `fast` preset only. `max` is byte-identical, so the
+held-out stills did not move at all.
+
+    1080p fast, 1 slice      bytes      encode    decode
+    session start          3,635,971     2.04s   2.05s   ( 7.8 fps)
+    after                  3,652,863     1.68s   1.42s   (11.3 fps)
+
+### The decoder is a different program
+
+Everything above was profiled on the encoder, which was a mistake: the batched
+derivation hides on the encoder exactly the work the decoder cannot avoid.
+Profiling the *decoder* - which is the pure serial pass, no motion search, and
+the number that matters for a format - gives a different picture:
+
+| decoder, fast preset, 1080p | share |
+|---|---:|
+| scalar context derivation | **42.4%** |
+| zero flag: 3 experts + mixer | 19.2% |
+| range coder inlines | 13.6% |
+| probability and weight updates | 7.1% |
+| sign + exponent chain + mantissa | 4.5% |
+
+That immediately found a hoist worth **-6.2%**: the decoder was still
+re-deriving the constant confidence context per pixel, because only the batched
+encoder path had been taught to skip it.
+
+### Measured and rejected
+
+- **The exponent chain.** Assumed expensive because it runs about 1.85 times
+  per sample with three experts and an APM. It is 4.5% of the decoder. Its
+  mixer (`NBMIX`) is worth +0.218% on dev CIF and costs *no* instructions, so
+  it stays. Its third expert is redundant in `fast` for the same
+  constant-context reason as above, but dropping it is -0.55% instructions for
+  +0.003% - not worth a format change.
+- **Removing the ladder lookups' bounds checks.** Six of the seven indexes are
+  provably in range, and direct indexing is -2.9% instructions, -1.3% wall,
+  byte-identical. Rejected anyway: the proof runs through "a decoded magnitude
+  is at most 2^MAX_NB, and MAX_NB is 7, and 128 < LUT_SIDE", and MAX_NB is a
+  *runtime* parameter, so no static assertion can hold the invariant. On a
+  corrupt stream a larger MAX_NB would turn each of those into an out-of-bounds
+  read, which is the bug class fixed two commits earlier. 1.3% is not worth a
+  latent one.
+- **Prefetching the model entries.** The batched derivation makes the contexts
+  known a row in advance, so this looked free. IPC 3.81 says there is nothing
+  to hide.
+
 ## Could this ship as a real format? What the competition actually costs
 
 Asked directly, and measured rather than guessed. Everything below is single
