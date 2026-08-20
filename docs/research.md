@@ -1065,6 +1065,74 @@ residual is -0.182% (i.e. at the noise floor, nothing), and the west residual's
 magnitude bin is -0.364% (about -0.19% real). The model already has the
 magnitude through `err_sum`; the sign it does not have, and does not want.
 
+### Ranking the proposed contexts, and a warning about how they were ranked
+
+Every candidate context suggested by either reviewer, measured the same way:
+conditional entropy of the zero flag over six dev images and three RCT planes,
+each against a **control of identical cardinality** - a random split carrying no
+information. The control is the whole point, because empirical conditional
+entropy always falls when contexts are split.
+
+| candidate | contexts | measured | control | real |
+|---|---:|---:|---:|---:|
+| CALIC-style texture (6 causal neighbours vs local mean) | x64 | -2.652% | -1.399% | **~1.25%** |
+| predictor disagreement (max-min of 5 predictors) | x8 | -0.882% | -0.174% | **~0.71%** |
+| spatial parity (x%2, y%2) | x4 | -0.351% | -0.078% | ~0.27% |
+| west residual magnitude bin | x8 | -0.364% | -0.174% | ~0.19% |
+| sign of the west residual | x3 | -0.182% | ~-0.18% | **nothing** |
+
+**And the warning.** Stacking texture with disagreement gives x512, i.e. 57,000
+contexts against a few hundred thousand samples per plane - and there the
+random control scored **-8.398% against the real combination's -4.091%**. The
+control beat the signal. Past a few hundred contexts this method measures
+sample sparsity, not information.
+
+That is worth keeping in mind for the whole table above, not just the last row:
+these numbers rank candidates and bound them *optimistically*. They model no
+adaptation cost at all, and adaptation cost is exactly what sinks extra
+contexts in a real adaptive coder - which is very likely why the learned context
+tree, built and rejected earlier in this document, looked good before it was
+built. Nothing here is a predicted file-size win. Implementation on the dev
+split remains the only real test.
+
+### Bounding the two structural suggestions
+
+**Hierarchical / multi-scale prediction (JPEG XL's Squeeze).** The claim is that
+a raster-scan causal predictor cannot see below or to the right, and resolving
+lower resolutions first lifts that limit. True in principle; the question is how
+much is there. Replacing causal MED with a crude *non-causal* predictor - the
+average of all eight neighbours, which no real scheme could fully achieve -
+moves residual entropy from **3.714 to 3.625 bits per sample, about 2.4%**.
+So the ceiling on the whole idea is small relative to the 6.86% gap, and a real
+multi-scale scheme also has to pay for coding the pyramid. Not worthless, but
+not where the gap lives.
+
+**Cross-component prediction (predicting chroma from reconstructed luma, as
+distinct from using a luma error map as context).** Measured directly: the
+correlation between the luma residual and each chroma residual **after** the
+RCT averages **0.0965** and peaks at 0.1775. The reversible colour transform has
+already taken the cross-channel redundancy; a linear chroma-from-luma model has
+about one percent of variance left to work with. This one is close to dead.
+
+### What the mixer and the NLMS filter actually cost
+
+Asked directly whether the online logistic mixer is the anchor on decode speed.
+It is not, by an order of magnitude. kodim13, `max` preset, decode pinned:
+
+| stage removed | decode time | bytes | verdict |
+|---|---:|---:|---|
+| full model | 0.2420s | 564,004 | — |
+| the 13-tap NLMS filter and its update | 0.2006s (**-17.1%**) | 573,772 (+1.73%) | the real cost |
+| the mixer dot product and weight update | 0.2382s (**-1.5%**) | 564,936 (+0.17%) | negligible |
+
+The mixer is **1.5%** of decode. The NLMS filter it was being contrasted with is
+**17.1%**, eleven times more. Dropping online gradient descent for offline
+weights would buy a percent and a half and give up the mechanism the whole model
+is built on.
+
+The NLMS row is the interesting one: 17.1% of decode for 1.73% of bytes is the
+worst stage trade left in `max`, which is exactly why `fast` already drops it.
+
 ### The other new idea: context clustering, not context splitting
 
 Also worth recording because it is genuinely distinct from what was tried here.
