@@ -1053,10 +1053,20 @@ int hve_code_plane(int encode, uint8_t *plane, int64_t height, int64_t width,
                 mexp_b = 1 + LOOKUP(luts.mexp, LUT_MEXP, m->mexp_l, ae);
             }
 
-            conf_b = hve_bisect(m->conf_l, energy);
-            conf_ctx = kind_conf + conf_b * nadj
-                + LOOKUP(luts.adj, LUT_ADJ, m->adj_l,
-                         lms_adj >= 0 ? lms_adj : -lms_adj);
+            /* Without LMS, energy and lms_adj are both zero for every pixel,
+             * so this was a linear ladder scan and a table lookup per sample
+             * to arrive at the same answer every time. The batched encoder
+             * path already skipped it; the decoder never gets that path, and
+             * the decoder is the side that has to be fast. */
+            if (f_lms) {
+                conf_b = hve_bisect(m->conf_l, energy);
+                conf_ctx = kind_conf + conf_b * nadj
+                    + LOOKUP(luts.adj, LUT_ADJ, m->adj_l,
+                             lms_adj >= 0 ? lms_adj : -lms_adj);
+            } else {
+                conf_b = flat_conf_b;
+                conf_ctx = flat_conf_ctx;
+            }
 
         have_context:
             ex[0] = stretch[4095 - (m->zero_p[zctx] >> 3)];
