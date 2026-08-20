@@ -13,3 +13,4 @@ build/
 hve/_hve*.so
 hve/_hve*.pyd
 hve/_hve*.dylib
+.claude/worktrees/

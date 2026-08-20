@@ -96,9 +96,12 @@ def cmd_info(args):
         raise SystemExit("unrecognised container")
 
 
-# Keep these names in step with csrc/main.c's preset_name().
+# Keep this in step with csrc/main.c's PRESET_FAST, which carries the reasoning.
+# tests/test_cli_binary.py imports this and checks the binary agrees, so the two
+# cannot drift silently.
 PRESET_FAST = model.FEAT_ALL & ~(model.FEAT_MATCH | model.FEAT_LMS
-                                 | model.FEAT_BLEND)
+                                 | model.FEAT_BLEND | model.FEAT_APM1
+                                 | model.FEAT_APM2)
 
 
 def _preset_name(features):

@@ -272,7 +272,7 @@ def test_truncated_file_is_rejected_not_crashed(tmp_path):
 # presets (the feature bitmask in the header)
 
 
-PRESET_FAST = 127 & ~(4 | 2 | 1)          # -match -lms -blend, as csrc/main.c
+from hve.cli import PRESET_FAST                # and the binary must agree
 
 
 @pytest.mark.parametrize("preset,features", [("max", 127), ("fast", PRESET_FAST)])

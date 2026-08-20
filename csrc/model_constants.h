@@ -12,8 +12,8 @@
 #include <stdint.h>
 
 /* --- container --- */
-#define HVI_MAGIC "HVI4"
-#define HVV_MAGIC "HVV3"
+#define HVI_MAGIC "HVI5"
+#define HVV_MAGIC "HVV4"
 #define HVE_FLAG_RCT 1
 
 /* --- video --- */

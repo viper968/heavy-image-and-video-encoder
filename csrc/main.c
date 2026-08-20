@@ -64,9 +64,10 @@ static void usage(FILE *fh)
         "options:\n"
         "  --frames N   stop after N video frames\n"
         "  --threads N  motion-search threads (default: one per core)\n"
-        "  --preset P   max (default, best ratio) or fast (1.8-2.5x quicker\n"
-        "               on 1080p video for 1-4%% more bytes). Recorded in the\n"
-        "               file, so decoding needs no flag.\n"
+        "  --preset P   max (default, best ratio) or fast (about 2.5x quicker\n"
+        "               to decode 1080p; costs bytes on stills, saves them on\n"
+        "               sparse video). Recorded in the file, so decoding needs\n"
+        "               no flag.\n"
         "  --slices N   independent horizontal slices, coded on N cores, or\n"
         "               `auto` (default: one per ~250k pixels, capped at the\n"
         "               core count). Each slice relearns the model, so this\n"
@@ -87,11 +88,17 @@ static int fail(void)
 
 /* Presets. "max" is the full model and the best ratio on photographs; "fast"
  * drops the three stages that a 1080p video ablation showed are not merely
- * expensive there but actively harmful. Which one wins is content-dependent,
- * which is exactly why the choice travels in the header. */
+ * expensive there but actively harmful, plus the two secondary-estimation
+ * stages, which are the worst value in the model by a wide margin: together
+ * they are 10% of the kernel's instructions and 16% of encode wall time, and
+ * they buy +0.033% on the dev CIF clips and +0.21% on the dev stills. Keeping
+ * them in `max` costs nothing there; paying 16% for 0.03% in the preset whose
+ * whole purpose is that trade would be indefensible. Which preset wins is
+ * content-dependent, which is exactly why the choice travels in the header. */
 #define PRESET_MAX  HVE_FEAT_ALL
 #define PRESET_FAST (HVE_FEAT_ALL & ~(HVE_FEAT_MATCH | HVE_FEAT_LMS \
-                                      | HVE_FEAT_BLEND))
+                                      | HVE_FEAT_BLEND | HVE_FEAT_APM1 \
+                                      | HVE_FEAT_APM2))
 
 static const char *preset_name(int64_t f)
 {

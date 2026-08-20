@@ -584,6 +584,12 @@ def code_plane(coder, encode, width, height, kind, model, src=None, luma_err=Non
             conf_ctx = (kind_conf + conf_b * NADJ
                         + bisect_right(adj_ladder,
                                        lms_adj if lms_adj >= 0 else -lms_adj))
+            # The last two experts are dropped when their context cannot
+            # vary: match_ctx is fixed without the match model, and conf_ctx
+            # is fixed without LMS, so each would be a lone adaptive scalar.
+            # This file implements FEAT_ALL only, where both are live, so the
+            # rule never fires here - csrc/kernel.c carries it, and the
+            # measurement is in docs/research.md.
             experts = [stretch_t[4095 - (zero_p[zctx] >> 3)],
                        stretch_t[4095 - (dir_p[dir_ctx] >> 3)],
                        stretch_t[4095 - (diff_p[diff_ctx] >> 3)],
