@@ -1147,6 +1147,91 @@ what a real coder would face, gives:
 | per-64x64 choice among five | 26,477,004 | -0.32% |
 | plus the per-block flags | 26,478,341 | **-0.31%** |
 
+### Round three: the accounting has to match how the coder resets
+
+A third variant of the same trap, caught before it was reported. Scoring MDL
+over all eighteen image-planes **pooled into one context space** says the
+texture context is worth -1.364%. But the codec resets its model per file and
+separates contexts by plane kind, so every (image, plane) is a fresh adaptive
+model. Scoring MDL **per plane and summing**, which is what the coder actually
+faces, says +0.069% - dead. Pooling amortises the description cost over 18x more
+samples than the coder ever gets.
+
+All figures below use the per-plane accounting.
+
+### Texture, coarsened: the information was real but over-fragmented
+
+The suggestion was to merge the 64 texture states rather than invent a new
+quantiser, and score every merge level - testing whether the *information* is
+present rather than whether some new quantiser happens to fit. Merging by
+P(nonzero), grouping fixed across all planes:
+
+| merged texture states | MDL vs baseline |
+|---:|---:|
+| 2 | +0.001% |
+| **4** | **-0.348%** |
+| 8 | -0.306% |
+| 16 | -0.201% |
+| 32 | -0.047% |
+| 64 (unmerged) | +0.069% |
+
+So the texture signal is real; six bits of it was simply too expensive to
+describe. That is a genuine partial resurrection of an idea this document had
+declared dead one section earlier.
+
+It does not survive contact with disagreement, though:
+
+| context | MDL vs baseline |
+|---|---:|
+| disagreement only [x5] | **-0.606%** |
+| texture, 4 merged states only [x4] | -0.348% |
+| both [x20] | -0.676% |
+
+0.606 and 0.348 would be 0.954 if they were independent; together they are
+0.676. The two features are largely measuring the same thing - how uncertain the
+local prediction is - and texture adds 0.07 points for four times the contexts.
+**Disagreement alone is the build.**
+
+### Settling the disagreement design by measurement
+
+*Which quantiser*, per-plane MDL:
+
+| edges | contexts | MDL |
+|---|---:|---:|
+| 1,2,4,8,16,32,64 (first guess) | x8 | -0.588% |
+| **1,2,4,8** | **x5** | **-0.606%** |
+| 1,2,8,32 | x5 | -0.486% |
+| 1,4,16 | x4 | -0.288% |
+| 1,2,3,4,6,8,12,16,24,32,48,64,96 | x14 | -0.619% |
+
+Geometric spacing was the right instinct and the first guess was close, but five
+bins beat eight - the tail bins were paying description cost for samples that
+are nearly all in the same state.
+
+*Which statistic*: range (max-min) gives -0.588%, median absolute deviation
+-0.392%. So what carries the information is specifically **the presence of one
+outlying predictor**, not general ensemble spread.
+
+*Which predictors*, which is the part that decides implementation cost:
+
+| set | MDL |
+|---|---:|
+| **MED, west, north, planar** | **-0.696%** |
+| MED, GAP, west, north, planar | -0.606% |
+| west, north, nwest, neast (no MED) | -0.540% |
+| MED, west, north, nwest, neast, planar | -0.048% |
+
+The best set is also the cheapest. It needs no GAP - which matters, because GAP
+only exists when the LMS stage is on, so a set requiring it could not be used in
+the `fast` preset at all. All four values are already in hand where the context
+is formed; `planar` is one add and one subtract. Adding nwest and neast destroys
+the feature, presumably because they are frequently the outlier themselves and
+swamp the range.
+
+**Final design: disagreement = max - min over {MED, west, north, west+north-
+nwest}, quantised at 1,2,4,8, as a fifth dimension on the zero-flag context.
+-0.696% by per-plane MDL.**
+
 ### The methodological lesson, which is the real output of this round
 
 Every naive estimate in this exercise was optimistic by a factor of two to ten,
