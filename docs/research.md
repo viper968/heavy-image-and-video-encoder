@@ -1021,6 +1021,78 @@ cannot know a value before decoding it, so it still derives one pixel at a
 time. Encode and decode used to cost about the same; encode is now the faster
 of the two.
 
+## An outside review, and the one lead that survived a control
+
+A second opinion was solicited from another model family with the brief in
+`docs/outside-review-brief.md`; the raw replies are in
+`docs/outside-review-response-gpt.md`. Most of what came back either confirmed
+measurements already here or was already on the rejected list. Two things were
+genuinely new, and one of them has now been measured.
+
+### Predictor disagreement as an explicit context
+
+The suggestion: the model conditions on *how busy* a neighbourhood is, but not
+on *how much the predictors disagree with each other*. Five predictors reading
+127,128,127,128,127 and five reading 90,128,162,141,103 can have identical
+activity and completely different residual distributions. That latent variable
+is what the mixer is trying to discover; hand it over directly instead.
+
+Measured as conditional entropy of the **zero flag** over the six dev images,
+three RCT planes each, against a simplified baseline context of activity bin x
+error bin (112 contexts). Every addition below multiplies the context count by
+eight, so two controls of the same cardinality are included - because empirical
+conditional entropy always falls when contexts are split, information or not:
+
+| context | H(nonzero \| ctx) | vs baseline |
+|---|---:|---:|
+| baseline, 112 contexts | 0.72506 | — |
+| **+ predictor disagreement**, max-min of 5 | **0.71867** | **-0.882%** |
+| + a random 8-way split (control) | 0.72380 | -0.174% |
+| + a coherent but meaningless split (control) | 0.72374 | -0.183% |
+
+The overfitting floor is about -0.18%, so the real information is roughly
+**-0.7%** on the zero flag. Two caveats before anyone spends it: the baseline
+here is a simplification of the real context set, which also carries direction
+and gradient contexts plus a mixer that may already recover part of this; and
+the zero flag is only part of the file. Treat -0.7% as an upper bound on the
+zero-flag share, not a predicted file-size win.
+
+It is still the first candidate all session with controlled evidence of
+conditional structure the model is not capturing. Worth building.
+
+Smaller signals from the same measurement, same controls: the *sign* of the west
+residual is -0.182% (i.e. at the noise floor, nothing), and the west residual's
+magnitude bin is -0.364% (about -0.19% real). The model already has the
+magnitude through `err_sum`; the sign it does not have, and does not want.
+
+### The other new idea: context clustering, not context splitting
+
+Also worth recording because it is genuinely distinct from what was tried here.
+The learned context tree that was built and rejected *splits* contexts. JPEG XL
+additionally *clusters* them - merging contexts whose histograms are similar, so
+the adaptive cost is paid once for a group rather than per context. Splitting
+and merging are not the same degree of freedom, and only the first was tested.
+
+There is a cheap bound available before building anything: dump the context
+stream and the symbols, compute the empirical entropy per existing context, then
+recompute after optimally merging contexts by histogram similarity with
+hindsight. If hindsight clustering gains nothing, the idea is dead for free.
+
+### What the review confirmed rather than added
+
+Independently, from the numbers in the brief alone, it reached the same
+conclusion this document did about where speed work should go: remove whole
+stages rather than make individual lookups cheaper, because the machine is
+load-port bound. It also called more experts, more APM stages and further mixer
+sophistication dead ends, which matches every measurement here.
+
+One correction worth recording, because it is an easy misreading: it took the
+-24% decode result as evidence that the architecture is "over-modelled" in
+general. It is not. Those two experts were dropped because their contexts are
+*provably constant when the match model and LMS are off* - which is the `fast`
+preset only. Under `max` both are live, vary, and earn their place; `max` output
+did not change by a byte.
+
 ## The 1080p motion puzzle, resolved
 
 Prompted by an outside reviewer asking whether the half-pel interpolated
