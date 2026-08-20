@@ -406,11 +406,13 @@ single-threaded decode from 7.8 to 11.3 fps.
 
 What remains, as a share of decoder instructions:
 
-- **scalar context derivation, ~40%** — the decoder cannot use `derive_row`
-  because it needs the just-decoded west pixel. Only part of it truly depends
-  on west (task: precompute the previous-row half). The profile says that part
-  is worth **~5%**, not the 15-20% a first reading of the bucket suggests, so
-  price it before building it.
+- ~~**scalar context derivation, ~40%**~~ — **built and reverted.** Precomputing
+  the previous-row half is -6.0% instructions and only **-1.0% cycles**, with
+  wall clock straddling zero. IPC here is 4.40: the machine has spare ALU and no
+  spare load ports, so trading arithmetic for array loads does not pay. Read
+  "The decoder's row precompute" in `docs/research.md` — it explains three other
+  failed optimisations with the same mechanism, and gives the rule: **count
+  loads, not instructions and not cache misses.**
 - **3 experts + mixer, 19%** — all three earn their place, measured.
 - **range coder, 14%** — byte-at-a-time renormalisation. A wider renormalisation
   is a core-format change for maybe 5%; not attempted.

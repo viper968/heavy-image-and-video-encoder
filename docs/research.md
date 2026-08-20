@@ -1085,6 +1085,55 @@ That immediately found a hoist worth **-6.2%**: the decoder was still
 re-deriving the constant confidence context per pixel, because only the batched
 encoder path had been taught to skip it.
 
+### The decoder's row precompute: built, measured, reverted
+
+The biggest single item in the decoder is scalar context derivation, ~40% of
+its instructions, and only part of it depends on the west pixel it has to wait
+for. The folded differences above the row, the error neighbourhood to the
+north, the luma error map and the north-east gradient all read the previous row
+alone, so a whole row of them can be derived up front in loops that vectorise.
+This was built - as one shared derivation used by encoder and decoder alike,
+not a third mirror - and it is byte-identical on both presets.
+
+It does not pay:
+
+| decode 1080p, `fast`, pinned to one core | instructions | cycles | IPC | L1 misses |
+|---|---:|---:|---:|---:|
+| baseline | 23.71e9 | 5.390e9 | 4.40 | 54.7M |
+| precompute, 6 rows | 22.28e9 (**-6.0%**) | 5.370e9 (-0.4%) | 4.16 | 69.2M |
+| precompute, 5 rows | 22.46e9 (-5.3%) | 5.337e9 (**-1.0%**) | 4.21 | 66.2M |
+
+**Six percent fewer instructions bought one percent fewer cycles**, and wall
+clock straddles zero (+0.87% min, -0.95% median over 13 pinned runs).
+
+### Why, and why it explains the other failures too
+
+IPC 4.40 is the whole story. The machine is issuing near its limit, and what it
+has spare is *ALU*, not *load ports*. Every precomputed row replaces work with
+a load, so the trade only wins where the scalar form was already doing two or
+more loads.
+
+That is exactly what the difference between the two precompute rows shows. The
+six-row version included `sgn2`, the sign bin of `d2`, which is pure arithmetic
+on two values the predictor has already loaded - replacing it with an array
+turned zero loads into one. Dropping just that row and computing `d2` inline
+moved the result from -0.4% to -1.0%, while *adding* instructions back. Fewer
+instructions, slower; more instructions, faster.
+
+The same mechanism explains three earlier negatives that looked unrelated:
+
+- **narrowing the banks** added a sign-extension per load and moved nothing
+- **forcing gather** cut 10% of instructions and 0% of wall time
+- **the comparison-cascade ladder** replaced two L1 hits with sixteen compares
+  and lost, because compares are the thing there is spare capacity for - until
+  you need sixteen of them
+
+The general rule for this kernel, then: **instruction count is not the metric,
+and neither is cache miss count. Count loads.** At IPC 4.4 the only changes that
+pay are ones that remove memory operations without adding arithmetic to the
+dependency chain, or that remove whole stages. Both wins this round - the APM
+stages and the two constant-context experts - were the second kind.
+
 ### Narrowing the model banks: measured, and it does not pay
 
 The banks are all `int64_t` for 15-bit values, and `stretch` is 4096 x 8 bytes -
