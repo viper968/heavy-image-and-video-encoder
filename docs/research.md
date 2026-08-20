@@ -1085,6 +1085,52 @@ That immediately found a hoist worth **-6.2%**: the decoder was still
 re-deriving the constant confidence context per pixel, because only the batched
 encoder path had been taught to skip it.
 
+### Narrowing the model banks: measured, and it does not pay
+
+The banks are all `int64_t` for 15-bit values, and `stretch` is 4096 x 8 bytes -
+32KB of a 48KB L1, read several times per sample at scattered indices. That
+looks like an obvious win, so it was measured rather than assumed. All figures
+byte-identical, all 127 tests green, decode pinned to one P-core so the
+instruction counts are exactly reproducible (unpinned they drift 3-4% from
+P/E-core migration on this 12500H).
+
+| variant | instructions | L1 dcache load misses |
+|---|---:|---:|
+| baseline (decode 1080p) | 23.71e9 | 54.6M |
+| `stretch`/`squash` to int16 | 23.84e9 (**+0.55%**) | 29.0M (**-47%**) |
+| probability banks to uint16 | 24.17e9 (**+1.94%**) | 52.0M (-4.7%) |
+
+Halving the L1 misses buys nothing, and the narrower loads cost a
+sign-extension each. That is the compute-bound finding again, from the other
+direction: the loop was never stalling on those misses, so removing them is
+pure loss. Both reverted.
+
+`mixw`/`nbmixw` to int32 was **not attempted**, for a better reason. The mixer
+weights have no clamp - unlike `lmsw`, which does - and measuring their range
+over increasing clip lengths gives 299K at 30 frames, 9.1M at 60, 51M at 90,
+92M at 120: climbing, not converging. That is only about 23x below int32's
+ceiling after five seconds of ordinary video, so int32 would risk wrapping and
+diverging from the Python reference on real input.
+
+### Do unbounded mixer weights hurt compression?
+
+The obvious worry, once the weights are known to grow without bound: `dot` grows
+with them, `dot >> 16` leaves the +-2047 range squash is defined on, and the
+mixer saturates into always predicting near-certainty. Measured directly with a
+counter on bus CIF:
+
+| frames | mixes | saturated | max abs(dot >> 16) |
+|---:|---:|---:|---:|
+| 16 | 2,433,024 | 56 | 2153 |
+| 60 | 9,123,840 | 56 | 2153 |
+| 150 | 22,809,600 | 61 | 2153 |
+
+**0.0003%, and the ceiling does not move with clip length.** The weights that
+grow are the ones multiplying inputs that are near zero in their context, which
+is the mixer working as intended rather than running away. So the growth is a
+numeric-headroom note for anyone narrowing the type, not a compression bug, and
+adding a clamp would be solving a problem that does not exist.
+
 ### Measured and rejected
 
 - **The exponent chain.** Assumed expensive because it runs about 1.85 times
