@@ -1021,6 +1021,67 @@ cannot know a value before decoding it, so it still derives one pixel at a
 time. Encode and decode used to cost about the same; encode is now the faster
 of the two.
 
+## The 1080p motion puzzle, resolved
+
+Prompted by an outside reviewer asking whether the half-pel interpolated
+residual had ever been priced against a strict zero-vector integer reference.
+It had not. Two experiments settle it, and the answer is not the one the
+question was aiming at.
+
+### Forcing every block inter, so the mode decision cannot hide anything
+
+At 1080p only 0.9% of blocks choose inter, which masks the reference quality
+entirely. Forcing all four choices, `fast` preset, one slice:
+
+| clip | half-pel | integer-pel | zero vector | all intra |
+|---|---:|---:|---:|---:|
+| Sintel 1080p x16 | 5,702,222 | 5,757,490 | 5,536,009 | **3,667,721** |
+| bus CIF x24 | **1,652,007** | 1,723,821 | 2,358,846 | 1,752,169 |
+| mobile CIF x24 | **1,812,417** | 1,882,729 | 2,058,829 | 2,136,737 |
+| container CIF x24 | **1,098,385** | 1,099,949 | 1,099,742 | 1,512,122 |
+| akiyo CIF x16 | **323,807** | 324,534 | 325,231 | 776,272 |
+
+**Half-pel is not the problem.** It beats integer-pel on every clip, by 0.2% on
+the near-static ones and 4.3% on bus. The low-pass-filter worry - that
+interpolating the reference destroys grain the current frame still has, so the
+residual carries both - does not show up.
+
+What does show up is that on 1080p, **intra beats every temporal option by
+34%**, and the searched vectors are *worse than not moving at all*
+(5,702,222 against 5,536,009). The second part is largely MV coding overhead -
+about 122,000 vectors at ~11 bits is close to the whole 166KB gap - which is the
+rate-blind-search finding again rather than a new one.
+
+### Residual entropy, which removes the MV overhead from the comparison
+
+Zeroth-order entropy of the residual plane, so no model and no vector cost:
+
+| clip | spatial MED | temporal, zero vector | temporal, motion compensated |
+|---|---:|---:|---:|
+| Sintel 1080p | **1.062** | 2.191 | 2.184 |
+| bus CIF | 5.069 | 6.658 | 5.545 |
+| akiyo CIF | 3.257 | **1.353** | 1.353 |
+
+That is the answer. At 1080p **the spatial residual has half the entropy of the
+temporal one**, and motion compensation improves on a zero vector by 0.3% -
+against 17% on bus. The search is not broken; there is no motion-coherent signal
+left to find once the spatial predictor has taken 1.06 bits per sample.
+
+The mechanism is the one the working theory guessed, and the numbers are much
+stronger than expected. At high resolution neighbouring pixels are extremely
+correlated, so MED predicts almost everything; the temporal residual meanwhile
+sums two *independent* grain fields, the reference's and the current frame's,
+and no vector can subtract noise that is not there in the other frame.
+
+So the mode decision rejecting inter on 99.1% of 1080p blocks is correct, and
+the 0.70% that motion compensation is worth overall is the genuine remainder on
+the blocks where it does help. **This is closed: it was never a bug.**
+
+One caveat worth keeping. On bus the entropy table prefers spatial (5.069)
+while the *coded sizes* prefer half-pel inter (1,652,007 against intra's
+1,752,169). Zeroth-order entropy ignores context, and the model has plenty; do
+not use that table on its own to choose a predictor.
+
 ## Attacking the serial pass
 
 The serial pass had never been profiled on its own. Doing that first mattered,

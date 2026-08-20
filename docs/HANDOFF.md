@@ -430,10 +430,14 @@ Measured, not guessed; the tables are in "Could this ship as a real format" in
 - **Against FFV1**, the lossless video standard: **57.7% smaller on a static
   camera**, 14.4% smaller on a panning CIF clip, and **0.3% smaller and 3.1x
   slower** on moving 1080p. The whole advantage is temporal redundancy.
-- **Motion compensation contributes 0.70% at 1080p** and 59% on akiyo. Only
-  0.9% of 1080p blocks pick inter. This was checked three ways and is not a
-  tuning bug — at high resolution the spatial model already predicts nearly
-  everything.
+- ~~**Motion compensation contributes 0.70% at 1080p**~~ — **closed, not a bug.**
+  Forcing every block inter and pricing all four reference choices shows intra
+  beating every temporal option by 34% at 1080p, and residual entropy puts
+  spatial MED at **1.062 bits/sample against temporal's 2.191**. Motion
+  compensation improves on a zero vector by 0.3% there versus 17% on bus. Half-
+  pel is a consistent small win, not a liability. The mode decision rejecting
+  inter on 99.1% of blocks is correct. See "The 1080p motion puzzle, resolved"
+  in `docs/research.md`.
 - **Against the web**, which is lossy: AV1 at crf32 is **107x smaller and 22x
   faster to decode** on the same clip. That gap is not closable.
 - **On stills** we beat PNG by 32% and WebP lossless by 4.9%, and lose to
