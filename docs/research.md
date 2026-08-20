@@ -1095,6 +1095,79 @@ tree, built and rejected earlier in this document, looked good before it was
 built. Nothing here is a predicted file-size win. Implementation on the dev
 split remains the only real test.
 
+### Round two: an MDL penalty kills the leader and promotes the runner-up
+
+The reviewers both objected to the ranking method above, correctly. Empirical
+conditional entropy charges nothing for the model description, and the
+"subtract a same-cardinality control" heuristic used above is too crude a fix.
+The proper tool is a code length that pays for each context's own distribution -
+a Dirichlet-multinomial with a Jeffreys prior (alpha = 1/2), summed over
+contexts. Re-ranking the same candidates on the same data:
+
+| context set | MDL bits | vs baseline |
+|---|---:|---:|
+| baseline, 112 contexts | 5,100,484 | — |
+| **+ predictor disagreement [x8]** | **5,070,488** | **-0.588%** |
+| + CALIC texture [x64] | 5,104,020 | **+0.069%** |
+| + texture and disagreement [x512] | 5,135,088 | +0.678% |
+| control: random [x64] | 5,281,003 | +3.539% |
+| control: random [x512] | 5,759,520 | +12.921% |
+
+**This reverses the previous section's conclusion.** The texture context, which
+looked like the strongest candidate at ~1.25% under the control-subtraction
+heuristic, does not pay for its own description: 64x the contexts costs more
+than the structure it captures is worth. Predictor disagreement, which looked
+weaker, is the only candidate that survives - and it survives comfortably.
+
+The controls behave exactly as they should under MDL: they cost 3.5% and 12.9%
+rather than appearing to help.
+
+### Everything else the reviewers proposed, bounded
+
+Same session, same discipline - bound it before building it.
+
+| idea | measurement | verdict |
+|---|---|---|
+| **Residual DPCM** (code r - r_left) | residual entropy 3.710 -> **4.340** horizontal, 4.353 vertical | dead: the residual is already whitened, differencing it again costs 17% |
+| **JPEG-LS / FFV1 run mode** | P(next residual is zero given this one is) = **0.357**, so the mean run after entering zero territory is about **1.6 pixels** | dead for photographs: no run-length structure to exploit |
+| **Local per-group RCT** | see below | marginal, about -0.31% |
+| **Spatial parity (x%2, y%2)** | ~0.27% before any MDL charge, and it costs 4x the contexts | almost certainly dead |
+
+Local RCT deserves its own note because it was the one idea both reviewers
+independently ranked first, and because measuring it badly gives an answer ten
+times too large. Choosing among five reversible transforms per 64x64 block and
+summing each block's *own* residual entropy suggests **-3.21%**. But that gives
+every block its own histogram, which is the same overfitting the context table
+above fell into. Pooling the residuals into one histogram per plane, which is
+what a real coder would face, gives:
+
+| | bits | |
+|---|---:|---:|
+| current: one transform per image | 26,560,785 | — |
+| per-64x64 choice among five | 26,477,004 | -0.32% |
+| plus the per-block flags | 26,478,341 | **-0.31%** |
+
+### The methodological lesson, which is the real output of this round
+
+Every naive estimate in this exercise was optimistic by a factor of two to ten,
+and one of them **changed sign**:
+
+| candidate | naive | honest | |
+|---|---:|---:|---|
+| CALIC texture | -1.25% | +0.069% | sign flip |
+| local RCT | -3.21% | -0.31% | 10x |
+| predictor disagreement | -0.71% | -0.588% | held up |
+
+Two different measurements, contexts and colour transforms, failed in exactly
+the same way: a finer partition was allowed to fit its own histogram, and the
+apparent gain was mostly the fitting. Any future evaluation here has to either
+pay MDL for the description or pool the statistics the way the real coder sees
+them. This is almost certainly also the explanation for the learned context tree
+recorded earlier in this document looking good until it was built.
+
+Only one candidate is left standing: **predictor disagreement, -0.588% MDL on
+the zero flag.** That is what to build.
+
 ### Bounding the two structural suggestions
 
 **Hierarchical / multi-scale prediction (JPEG XL's Squeeze).** The claim is that
