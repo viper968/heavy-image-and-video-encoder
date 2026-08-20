@@ -5,13 +5,17 @@ then whichever of the three documents below matches what you are about to do.
 Update this file when the state it describes stops being true; a stale handoff
 is worse than none.
 
-**Last verified: the standalone C binary, all 96 tests green. Byte counts
-unchanged, so `results/` was not regenerated — nothing in it moved.**
+**Last verified: 127 tests green. The `max` preset is byte-identical to the
+published numbers, so `results/` still holds; the `fast` preset changed and is
+about 2.6x quicker to decode 1080p than it was.**
 
 ## What this is
 
-A lossless image and video codec that compresses harder than PNG, lossless
-WebP, FFV1, VP9 and AV1 by spending decode time instead of bits. The output is
+A lossless image and video codec that compresses harder than PNG and lossless
+WebP by spending decode time instead of bits. Against FFV1 it depends entirely
+on the content — 57.7% smaller on a static camera, 0.3% on moving 1080p — and
+against lossy web codecs it is not in the same category at all; see "Is this a
+real format" below before repeating any of those claims. The output is
 not viewable in any standard viewer — you ship the blob plus this decoder and
 get the original bytes back. It started from a much smaller idea (Huffman-code
 each colour channel) and the README tells that story with measurements.
@@ -45,16 +49,20 @@ Held-out split, 18 Kodak images never used for tuning
 | PNG optimised | 11,321,001 | 6.2 |
 
 31.9% under PNG, 4.8% under lossless WebP, **6.9% over JPEG XL**, and faster
-than both of them. Video leads x264, x265, AV1 and VP9 on **both** test clips —
-akiyo 315,981 and foreman 834,251, the latter 1.3% ahead of x264 — and on 16
-frames of 1080p Sintel it is 10.5% under x264 at 30,944 bytes. See the README
-tables.
+than both of them. Video leads x264, x265, AV1 and VP9 *lossless* on both test
+clips — akiyo 315,981 and foreman 834,251, the latter 1.3% ahead of x264.
 
-Video encode at 1080p is **2.7s against x264's ~0.3s**, roughly 10x. It was
-145s, then 9.8s warm after the search rewrite (the 19.8s once published for that
-included numba's cold compile), then 2.7s with the C backend. The motion search
-is now threaded and effectively free at 0.12s; the remaining time is the pixel
-loop, which is serial by construction. See "The C port" in `docs/research.md`.
+Ignore any surviving claim of "10.5% under x264 at 30,944 bytes" on 1080p
+Sintel: that was 16 frames starting at frame 0 of the trailer, of which the
+first eight are black. On real 1080p content the codec is roughly level with
+x264 lossless on size. The measured comparison is the park_joy table in
+`README.md`.
+
+1080p timing, `fast` preset, 16 frames: **1.7s encode and 1.4s decode on one
+core, 0.5s and 0.4s across eight slices**. Encode was 145s in Python, 9.8s with
+numba, 2.7s with the C backend, and the rest came from batching the encoder's
+context derivation and cutting two model stages that were not earning their
+instructions. The motion search is threaded and effectively free at 0.12s.
 
 Treat `cpu s` as approximate — a repeat run moved JPEG XL e9 from 63.9s to 77.9s
 on identical code, and this machine's noise floor on a 3-second benchmark is
